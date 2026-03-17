@@ -37,7 +37,7 @@ from eventmanager import Evt
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 FPVGATE_PORT = 80
 FPVGATE_HTTP_TIMEOUT = 2.0  # seconds - event handlers are async so this is safe
 
@@ -77,6 +77,15 @@ def initialize(rhapi):
         panel="fpvgate",
     )
 
+    # FPVGate -> RH: clock sync endpoint
+    # FPVGate GETs this periodically to compute its clock offset against RH's
+    # monotonic clock.  The response is {"monotonic_ms": <int>} where the value
+    # is Python's time.monotonic() * 1000 -- the same time base that
+    # rhapi.race.start_time_internal uses.
+    @APP.route("/fpvgate/time", methods=["GET"])
+    def fpvgate_time():
+        return jsonify({"monotonic_ms": int(monotonic() * 1000)}), 200
+
     # FPVGate -> RH: lap recording endpoint
     @APP.route("/fpvgate/lap", methods=["POST"])
     def fpvgate_record_lap():
@@ -108,11 +117,18 @@ def initialize(rhapi):
             return jsonify({"status": "ignored", "reason": "race not running"}), 200
 
         # Resolve timestamp now, before leaving request context.
-        # add_lap() expects an absolute monotonic time (seconds since boot),
-        # not elapsed milliseconds. Convert raceTimeMs -> absolute seconds.
-        race_start = rhapi.race.start_time_internal  # absolute monotonic seconds
+        # Prefer timestampMs (absolute RH monotonic ms, sent when FPVGate has
+        # a synced clock offset).  Fall back to raceTimeMs + race_start for
+        # firmware that has not yet performed a clock sync.
+        timestamp_ms = data.get("timestampMs")
         race_time_ms = data.get("raceTimeMs")
-        if race_time_ms is not None:
+        race_start   = rhapi.race.start_time_internal  # absolute monotonic seconds
+        if timestamp_ms is not None:
+            try:
+                timestamp_abs = int(timestamp_ms) / 1000.0
+            except (TypeError, ValueError):
+                timestamp_abs = monotonic()
+        elif race_time_ms is not None:
             try:
                 timestamp_abs = race_start + int(race_time_ms) / 1000.0
             except (TypeError, ValueError):

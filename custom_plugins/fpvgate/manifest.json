@@ -2,7 +2,7 @@
   "domain": "fpvgate",
   "name": "FPVGate",
 "description": "Bidirectional integration between FPVGate RSSI-based lap timers and RotorHazard. Forwards hardware gate crossings to RH as live laps with accurate timestamps, and lets RH control race start/stop/countdown on the FPVGate."
-  "version": "1.0.0",
+"version": "1.1.0"
   "required_rhapi_version": "1.0.0",
   "license": "MIT",
   "documentation_uri": "https://github.com/LouisHitchcock/fpvgate-rh-plugin#readme"
