@@ -1,6 +1,6 @@
 # FPVGate RotorHazard Plugin
 
-Bidirectional integration between [FPVGate](https://github.com/LouisHitchcock/FPVGate) IR lap timers and [RotorHazard](https://github.com/RotorHazard/RotorHazard).
+Bidirectional integration between [FPVGate](https://github.com/LouisHitchcock/FPVGate) RSSI-based lap timers and [RotorHazard](https://github.com/RotorHazard/RotorHazard).
 
 ## What it does
 
