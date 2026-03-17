@@ -1,7 +1,7 @@
 """
 FPVGate RotorHazard Integration Plugin
 =======================================
-Bidirectional integration between FPVGate IR lap timers and RotorHazard.
+Bidirectional integration between FPVGate RSSI lap timers and RotorHazard.
 
 FPVGate -> RH  (lap recording)
     FPVGate firmware POSTs to POST /fpvgate/lap with {"node": <seat>}.
