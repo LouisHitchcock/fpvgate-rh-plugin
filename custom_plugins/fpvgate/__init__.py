@@ -26,7 +26,7 @@ from .interface import FPVGateInterface, get_info
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "2.1.2"
+PLUGIN_VERSION = "2.1.3"
 SECTION = "FPVGate"
 PANEL = "fpvgate"
 DEFAULT_NODES = 8
@@ -55,6 +55,8 @@ class FPVGateProvider:
         self._rhapi = rhapi
         # Version 1 firmware: the gate's address learned from its lap POSTs.
         self._legacy_address = None
+        # Set at startup if RotorHazard didn't keep the gate's nodes.
+        self._nodes_dropped = False
 
         rhapi.config.register_section(SECTION)
 
@@ -149,7 +151,23 @@ class FPVGateProvider:
 
     def _startup(self, _args):
         self._rhapi.ui.register_quickbutton(PANEL, "fpvgate-reconnect", "Reconnect", self._reconnect)
+        self._check_nodes_kept()
         self._update_status()
+
+    def _check_nodes_kept(self):
+        """RotorHazard 4.5.1-dev builds before the fix for plugin interfaces
+        drop interfaces that plugins add while loading, so the gate connects
+        but RotorHazard has none of its nodes. Say so instead of failing
+        silently."""
+        seats = {id(seat) for seat in self._rhapi.interface.seats}
+        nodes = self.interface.nodes
+        self._nodes_dropped = bool(nodes) and not any(id(node) in seats for node in nodes)
+        if self._nodes_dropped:
+            logger.warning("FPVGate: RotorHazard dropped the gate's %d nodes after the plugin added them. "
+                           "This RotorHazard build doesn't keep plugin timing hardware; use 4.5.0 or a newer "
+                           "build.", len(nodes))
+            self._rhapi.ui.message_alert("FPVGate: this RotorHazard build dropped the gate's nodes, so the gate "
+                                         "can't be used for timing. Use RotorHazard 4.5.0 or a newer build.")
 
     def _shutdown(self, _args):
         self.interface.stop()
@@ -189,6 +207,10 @@ class FPVGateProvider:
         iface = self.interface
         if not self._address():
             text = "No address set. Enter the gate's address and restart RotorHazard."
+        elif self._nodes_dropped:
+            text = ("**RotorHazard dropped the gate's nodes.** This RotorHazard build doesn't keep timing "
+                    "hardware added by plugins (a bug in some 4.5.1-dev builds). Use RotorHazard 4.5.0 or a "
+                    "newer build.")
         elif iface.connected:
             info = iface.info or {}
             sync = f"{iface.sync_ms:.1f} ms" if iface.sync_ms is not None else "syncing"
@@ -301,33 +323,6 @@ class FPVGateProvider:
             logger.exception("FPVGate: error recording lap for seat %d", seat)
 
 
-def keep_plugin_interfaces(rhapi):
-    """RotorHazard 4.5.1-dev clears every timing interface before setting up
-    its own, which runs after plugins have added theirs: the gate's nodes are
-    dropped and RotorHazard finds none. Put plugin interfaces back straight
-    after the clear, ahead of RotorHazard's own, as before. Does nothing on
-    versions without clear_interfaces(). Remove once RotorHazard keeps them."""
-    try:
-        from interface_mapper import InterfaceType
-        mapper = rhapi._racecontext.interface
-        clear = mapper.clear_interfaces
-    except (ImportError, AttributeError):
-        return
-    if getattr(clear, "keeps_plugin_interfaces", False):
-        return   # another plugin (or a reload) already did this
-
-    def clear_interfaces():
-        kept = [m.interface for m in mapper.mapped_interfaces if m.type == InterfaceType.RHAPI]
-        clear()
-        for interface in kept:
-            mapper.add_interface(interface, InterfaceType.RHAPI)
-
-    clear_interfaces.keeps_plugin_interfaces = True
-    mapper.clear_interfaces = clear_interfaces
-    logger.info("FPVGate: keeping plugin timing interfaces through RotorHazard's interface reset")
-
-
 def initialize(rhapi):
     logger.info("FPVGate plugin %s", PLUGIN_VERSION)
-    keep_plugin_interfaces(rhapi)
     FPVGateProvider(rhapi)

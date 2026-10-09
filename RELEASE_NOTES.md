@@ -1,10 +1,13 @@
-# FPVGate RotorHazard Plugin v2.1.2
+# FPVGate RotorHazard Plugin v2.1.3
 
 Use an FPVGate as RotorHazard timing hardware: up to eight nodes with an ESP32-C5 receiver, or one with RX5808.
 
-## Changes since v2.0.0
+## Changes since v2.1.2
 
-- **Works on RotorHazard 4.5.1-dev.** RotorHazard's development branch clears every timing interface before setting up its own, after plugins have added theirs, so the gate connected but RotorHazard showed "No receiver nodes found". The plugin now puts plugin interfaces back after that reset. It does nothing on released RotorHazard versions, and will be removed once RotorHazard keeps plugin interfaces itself.
+- **Uses only RotorHazard's public plugin API again**, so it passes RHFest and can be listed in Community Plugins. v2.1.2's workaround for RotorHazard 4.5.1-dev reached into RotorHazard internals and has been removed.
+- **Says when RotorHazard drops the gate's nodes.** Some RotorHazard 4.5.1-dev builds discard timing hardware added by plugins, so the gate connected but RotorHazard showed "No receiver nodes found". The plugin now detects this at startup and explains it in an alert, the FPVGate panel and the log. The bug has been reported to RotorHazard; until it's fixed, use RotorHazard 4.5.0.
+
+## Changes since v2.0.0
 - **Smooth RSSI and prompt laps.** The plugin read the gate's event stream in 512-byte blocks, so RSSI and passes arrived in bursts about a second apart: Sensor Tuning graphs looked stepped and laps showed up late. Events now arrive as the gate sends them, ten times a second. Lap times were never affected; passes carry the gate's own timestamp.
 - **Full-resolution RSSI option.** Shows an ESP32-C5 gate's RSSI as 0-1023 instead of 0-255. EnterAt/ExitAt switch to the same scale and snap to steps of 4. Needs gate firmware later than 1.9.0-Multi-Alpha-2; off by default.
 - **No more "System settings modified" banner after every start.** Saving the gate's node count at startup raised RotorHazard's restart banner each time.
