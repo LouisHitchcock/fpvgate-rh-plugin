@@ -1,60 +1,57 @@
 # FPVGate RotorHazard Plugin
 
-Bidirectional integration between [FPVGate](https://github.com/LouisHitchcock/FPVGate) RSSI-based lap timers and [RotorHazard](https://github.com/RotorHazard/RotorHazard).
+Use an [FPVGate](https://github.com/LouisHitchcock/FPVGate) lap timer as timing hardware in [RotorHazard](https://github.com/RotorHazard/RotorHazard).
 
-## What it does
+An FPVGate with an ESP32-C5 receiver times up to eight pilots from one gate; an RX5808 FPVGate times one. Either way it appears in RotorHazard as nodes, like any other timer:
 
-**FPVGate → RH (lap recording)**
-When the FPVGate hardware detects a gate crossing it POSTs the hardware-measured elapsed race time to RotorHazard, which records it as a live lap on the correct pilot seat with an accurate timestamp.
-
-**RH → FPVGate (race control)**
-RotorHazard race lifecycle events are forwarded to the FPVGate:
-
-| RH Event | FPVGate action |
-|---|---|
-| Stage | Clear laps + countdown beeps |
-| Start | Start timer |
-| Stop / Finish / Abort | Stop timer |
-| Laps Clear | Clear laps |
+- every pass reaches RotorHazard with the gate's own timestamp, so lap times don't depend on Wi-Fi delay
+- RotorHazard sets each node's frequency and enter/exit levels on the gate
+- live RSSI for every node on the Run page, with crossing indicators
+- all of RotorHazard's event tools work: heats, classes, formats, results, marshaling
 
 ## Requirements
 
 - RotorHazard 4.4.0 or later
-- FPVGate firmware with RotorHazard support (RH-Support branch or later)
-- Both devices on the same network
+- FPVGate firmware 1.9.0 or later (older firmware still works the version 1 way, see below)
+- The gate and RotorHazard on the same network
 
 ## Installation
 
-### Via RotorHazard Community Plugins (recommended)
-Search for **FPVGate** in the RotorHazard UI under Settings → Community Plugins and click Install.
+### Community Plugins (recommended)
+In RotorHazard, open **Settings > Plugins > Browse Community Plugins**, find **FPVGate** and install it.
 
 ### Manual
-1. Copy the `custom_plugins/fpvgate/` directory into your RotorHazard data `plugins/` folder (e.g. `~/rh-data/plugins/fpvgate/`).
-2. Restart the RotorHazard server.
+1. Copy `custom_plugins/fpvgate/` into your RotorHazard data `plugins/` folder (e.g. `~/rh-data/plugins/fpvgate/`).
+2. Restart RotorHazard.
 
-## Configuration
+## Setup
 
-### On RotorHazard
-1. Go to **Settings → FPVGate**.
-2. Enter the IP address of your FPVGate device (e.g. `192.168.0.158`).
-   Leave blank to use auto-detection — the plugin will learn the FPVGate IP from the first lap POST it receives.
+1. In RotorHazard, open **Settings > FPVGate** and enter the gate's IP address.
+2. Restart RotorHazard. The plugin asks the gate how many nodes it has (eight for an ESP32-C5 gate, one for RX5808) and adds them.
+3. The FPVGate panel shows **Connected**, the firmware version and how closely the clocks are synchronized.
 
-### On FPVGate
-1. Go to **Settings → WiFi & Connection → Race Synchronization**.
-2. Set **This Device** role to **RotorHazard**.
-3. Enter the RH Host IP (e.g. `192.168.0.21`) and select the Node Seat (0-indexed, matching the pilot's seat in RH).
+Nothing needs setting on the gate.
 
-### RotorHazard config.json
-When running without real timing hardware, enable mock nodes so `lap_add()` has a valid node to reference:
-```json
-"MOCK_NODES": 1
-```
+Frequencies come from RotorHazard's frequency setup and profiles, and replace the gate's own. An ESP32-C5 gate tunes 5180 to 5917 MHz; a node set outside that range is switched off and RotorHazard logs a warning. Enter and exit levels start from the gate's and are then adjusted in RotorHazard as usual.
+
+**Run races on the gate too** (on by default) also starts, stops and clears the gate's own race, so its display, LEDs and speaker follow RotorHazard. Turn it off to use the gate purely as a receiver.
 
 ## How it works
 
-The plugin registers a Flask route at `/fpvgate/lap` that receives `{"node": N, "raceTimeMs": T}` POSTed by the FPVGate firmware on each gate crossing. The elapsed millisecond timestamp is converted to the absolute monotonic time that `rhapi.race.lap_add()` expects, then the lap is recorded in a gevent greenlet to avoid a Flask app-context conflict.
+The plugin registers an FPVGate hardware interface with RotorHazard and talks to the gate over HTTP:
 
-Race control events are sent as fire-and-forget HTTP POSTs to the FPVGate's existing timer API (`/timer/start`, `/timer/stop`, `/timer/clearLaps`, `/timer/countdown`).
+| | |
+|---|---|
+| `GET /api/rh/info` | firmware, receiver, frequency range and each node's frequency and levels |
+| `GET /api/rh/clock` | the gate's clock. Polled every 5 seconds to keep the clocks in step; while it is polled, the gate reports every pass |
+| `POST /api/rh/node` | set one node's frequency and enter/exit levels |
+| `GET /api/rh/events` | server-sent events for the plugin only: `rhPass` (a pass, timed at its RSSI peak) and `rhRssi` (every node, 10 times a second) |
+
+The clock offset comes from the poll with the fastest round trip among the last 12, so it follows crystal drift over a long event.
+
+## Version 1 firmware
+
+Firmware before 1.9.0 POSTs laps to the plugin itself (`/fpvgate/lap`, clock sync from `/fpvgate/time`). That still works: set the gate's Race Synchronization role to RotorHazard with this computer's IP and the pilot's seat. Only one pilot is timed that way; update the gate for all of them.
 
 ## License
 

@@ -2,9 +2,7 @@ name: RHFest Validation
 
 on:
   push:
-    branches: ["main"]
   pull_request:
-    branches: ["main"]
   release:
     types: [published]
 
@@ -15,4 +13,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run RHFest
-        uses: RotorHazard/rhfest-action@v1
+        uses: RotorHazard/rhfest-action@v3.2.2

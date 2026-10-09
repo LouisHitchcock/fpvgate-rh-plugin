@@ -1,233 +1,279 @@
 """
-FPVGate RotorHazard Integration Plugin
-=======================================
-Bidirectional integration between FPVGate RSSI lap timers and RotorHazard.
+FPVGate RotorHazard Plugin
+==========================
+Adds an FPVGate lap timer to RotorHazard as timing hardware: one node for
+RX5808 builds, eight for ESP32-C5 multi-pilot builds. RotorHazard sets each
+node's frequency and enter/exit levels, shows its live RSSI, and gets every
+pass with the gate's own timestamp. See interface.py for the protocol.
 
-FPVGate -> RH  (lap recording)
-    FPVGate firmware POSTs to POST /fpvgate/lap with {"node": <seat>}.
-    The plugin records the crossing as a lap via rhapi.race.lap_add().
-    FPVGate's IP is auto-detected from incoming lap POSTs, or can be set
-    explicitly in the FPVGate panel on the RH Settings page.
-
-RH -> FPVGate  (race control)
-    The plugin listens to RH race lifecycle events and POSTs to FPVGate:
-      RACE_STAGE  -> /timer/clearLaps  + /timer/countdown  (arm + pre-race beeps)
-      RACE_START  -> /timer/start                          (timer starts)
-      RACE_FINISH -> /timer/stop                           (time-limited race ends)
-      RACE_STOP   -> /timer/stop                           (manual stop)
-      RACE_ABORT  -> /timer/stop                           (aborted during staging)
-      LAPS_CLEAR  -> /timer/clearLaps                      (manual lap clear)
-
-Installation:
-    Copy the 'fpvgate' directory into your RotorHazard data 'plugins/' folder.
-    (e.g. ~/rh-data/plugins/fpvgate/ on Windows, ~/rh-data/plugins/fpvgate/ on Pi)
-    Restart the RotorHazard server.
+Firmware without plugin-2 support (before 1.9.0) still works the version 1
+way: it POSTs laps to /fpvgate/lap and syncs its clock from /fpvgate/time.
 """
 
+import json
 import logging
-import urllib.request
 from time import monotonic
 
 import gevent
-from flask import request, jsonify
-from FlaskAppObj import APP
-from RHUI import UIField, UIFieldType
-from RHRace import RaceStatus
+import requests
+from flask import Blueprint, jsonify, request
+
 from eventmanager import Evt
+from RHRace import RaceStatus
+from RHUI import UIField, UIFieldType
+
+from .interface import FPVGateInterface, get_info
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "1.1.0"
-FPVGATE_PORT = 80
-FPVGATE_HTTP_TIMEOUT = 2.0  # seconds - event handlers are async so this is safe
+PLUGIN_VERSION = "2.0.0"
+SECTION = "FPVGate"
+PANEL = "fpvgate"
+DEFAULT_NODES = 8
+HTTP_TIMEOUT_S = 2.0
 
-# Auto-detected IP of the most recently connected FPVGate.
-# Overridden by the 'fpvgate_host_ip' RH setting if configured.
-_fpvgate_ip = None
+# For labelling the gate's frequencies in RotorHazard's profile.
+BANDS = {
+    "R": [5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917],
+    "F": [5740, 5760, 5780, 5800, 5820, 5840, 5860, 5880],
+    "A": [5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725],
+    "B": [5733, 5752, 5771, 5790, 5809, 5828, 5847, 5866],
+    "E": [5705, 5685, 5665, 5645, 5885, 5905, 5925, 5945],
+    "L": [5362, 5399, 5436, 5473, 5510, 5547, 5584, 5621],
+}
 
-# Stored rhapi reference so event handlers can read the configured IP.
-_rhapi = None
 
-OPT_HOST_IP = "fpvgate_host_ip"
+def band_channel(frequency):
+    for band, channels in BANDS.items():
+        if frequency in channels:
+            return band, channels.index(frequency) + 1
+    return None, None
 
 
-# ---------------------------------------------------------------------------
-# Plugin entry point
-# ---------------------------------------------------------------------------
+class FPVGateProvider:
+    def __init__(self, rhapi):
+        self._rhapi = rhapi
+        # Version 1 firmware: the gate's address learned from its lap POSTs.
+        self._legacy_address = None
+
+        rhapi.config.register_section(SECTION)
+        rhapi.ui.register_panel(PANEL, "FPVGate", "settings")
+        rhapi.fields.register_option(
+            UIField(
+                name="address",
+                label="FPVGate Address",
+                field_type=UIFieldType.TEXT,
+                value="",
+                desc="IP address or hostname of the gate, e.g. 192.168.4.1. Restart RotorHazard after changing it.",
+                placeholder="192.168.4.1",
+                persistent_section=SECTION,
+                persistent_restart=True,
+            ),
+            panel=PANEL,
+        )
+        rhapi.fields.register_option(
+            UIField(
+                name="node_count",
+                label="Nodes",
+                field_type=UIFieldType.NUMBER,
+                value=DEFAULT_NODES,
+                desc="Used when the gate can't be reached at startup. Set automatically from the gate.",
+                html_attributes={"min": 1, "max": 8},
+                persistent_section=SECTION,
+                persistent_restart=True,
+            ),
+            panel=PANEL,
+        )
+        rhapi.fields.register_option(
+            UIField(
+                name="mirror_race",
+                label="Run races on the gate too",
+                field_type=UIFieldType.CHECKBOX,
+                value="1",
+                desc="Start, stop and clear the gate's own race with RotorHazard's, for its display, LEDs and speaker.",
+                persistent_section=SECTION,
+            ),
+            panel=PANEL,
+        )
+
+        address = self._address()
+        node_count = rhapi.config.get(SECTION, "node_count", as_int=True) or DEFAULT_NODES
+        info = get_info(address, timeout=3.0) if address else None
+        if info and info.get("nodes"):
+            node_count = len(info["nodes"])
+            rhapi.config.set(SECTION, "node_count", node_count)
+        self.interface = FPVGateInterface(address, node_count if address else 0, self._update_status, info,
+                                          self._adopt_frequencies)
+        rhapi.interface.add(self.interface)
+
+        rhapi.events.on(Evt.STARTUP, self._startup)
+        rhapi.events.on(Evt.SHUTDOWN, self._shutdown)
+        rhapi.events.on(Evt.RACE_STAGE, self._race_stage, priority=200)
+        rhapi.events.on(Evt.RACE_START, self._race_start, priority=200)
+        rhapi.events.on(Evt.RACE_FINISH, self._race_stop, priority=200)
+        rhapi.events.on(Evt.RACE_STOP, self._race_stop, priority=200)
+        rhapi.events.on(Evt.RACE_ABORT, self._race_stop, priority=200)
+        rhapi.events.on(Evt.LAPS_CLEAR, self._laps_clear, priority=200)
+
+        rhapi.ui.blueprint_add(self._legacy_blueprint())
+
+    def _address(self):
+        return (self._rhapi.config.get(SECTION, "address") or "").strip()
+
+    #
+    # UI
+    #
+
+    def _startup(self, _args):
+        self._rhapi.ui.register_quickbutton(PANEL, "fpvgate-reconnect", "Reconnect", self._reconnect)
+        self._update_status()
+
+    def _shutdown(self, _args):
+        self.interface.stop()
+
+    def _reconnect(self, _args=None):
+        if not self._address():
+            self._rhapi.ui.message_notify("Set the FPVGate address first, then restart RotorHazard.")
+            return
+        self._rhapi.ui.message_notify("Reconnecting to FPVGate...")
+        self.interface.restart()
+
+    def _adopt_frequencies(self, nodes):
+        """First connection: put the gate's frequencies into RotorHazard's
+        current profile, so RotorHazard starts from how the gate is set up."""
+        try:
+            profile = self._rhapi.race.frequencyset
+            freqs = json.loads(profile.frequencies)
+            changed = False
+            for node in nodes:
+                index = node.index
+                if index < 0:
+                    continue
+                for key in ("f", "b", "c"):
+                    while len(freqs[key]) <= index:
+                        freqs[key].append(None if key != "f" else 0)
+                band, channel = band_channel(node.frequency)
+                if (freqs["f"][index], freqs["b"][index], freqs["c"][index]) != (node.frequency, band, channel):
+                    freqs["f"][index], freqs["b"][index], freqs["c"][index] = node.frequency, band, channel
+                    changed = True
+            if changed:
+                self._rhapi.db.frequencyset_alter(profile.id, frequencies=freqs)
+                logger.info("FPVGate: profile '%s' now uses the gate's frequencies %s", profile.name, freqs["f"])
+        except Exception:
+            logger.exception("FPVGate: could not copy the gate's frequencies into the profile")
+
+    def _update_status(self):
+        iface = self.interface
+        if not self._address():
+            text = "No address set. Enter the gate's address and restart RotorHazard."
+        elif iface.connected:
+            info = iface.info or {}
+            sync = f"{iface.sync_ms:.1f} ms" if iface.sync_ms is not None else "syncing"
+            text = (f"**Connected** to {info.get('board', 'FPVGate')} at {iface.address}, "
+                    f"firmware {info.get('version', '?')}, {len(iface.nodes)} nodes, clock within {sync}.")
+        elif self._legacy_address:
+            text = (f"Receiving laps from version 1 firmware at {self._legacy_address}. "
+                    f"Update the gate to 1.9.0 or later for every pilot, live RSSI and tuning from RotorHazard.")
+        else:
+            text = f"**Not connected** to {iface.address}. Check the gate is on and on this network."
+        self._rhapi.ui.register_markdown(PANEL, "fpvgate_status", text)
+        self._rhapi.ui.broadcast_ui("settings", replace_panels=False)
+
+    #
+    # RotorHazard -> gate race control
+    #
+
+    def _gate(self):
+        if self.interface.connected:
+            return self.interface.address
+        return self._address() or self._legacy_address
+
+    def _post(self, path):
+        address = self._gate()
+        if not address:
+            return
+        try:
+            response = requests.post(f"http://{address}{path}", json={}, timeout=HTTP_TIMEOUT_S)
+            logger.debug("FPVGate POST %s -> HTTP %d", path, response.status_code)
+        except Exception as exc:
+            logger.warning("FPVGate POST %s failed: %s", path, exc)
+
+    def _mirror(self):
+        value = self._rhapi.config.get(SECTION, "mirror_race")
+        return str(value) not in ("0", "False", "false", "")
+
+    def _race_stage(self, _args):
+        if self._mirror():
+            self._post("/timer/clearLaps")
+            self._post("/timer/countdown")
+
+    def _race_start(self, _args):
+        if self._mirror():
+            self._post("/timer/start")
+
+    def _race_stop(self, _args):
+        if self._mirror():
+            self._post("/timer/stop")
+
+    def _laps_clear(self, _args):
+        if self._mirror():
+            self._post("/timer/clearLaps")
+
+    #
+    # Version 1 firmware: laps POSTed by the gate
+    #
+
+    def _legacy_blueprint(self):
+        bp = Blueprint("fpvgate_legacy", __name__)
+        rhapi = self._rhapi
+
+        # The gate syncs its clock to time.monotonic(), the clock that
+        # rhapi.race.start_time_internal uses.
+        @bp.route("/fpvgate/time", methods=["GET"])
+        def fpvgate_time():
+            return jsonify({"monotonic_ms": int(monotonic() * 1000)}), 200
+
+        @bp.route("/fpvgate/lap", methods=["POST"])
+        def fpvgate_lap():
+            if self._legacy_address != request.remote_addr:
+                self._legacy_address = request.remote_addr
+                gevent.spawn(self._update_status)
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"status": "error", "message": "Invalid JSON payload"}), 400
+            try:
+                seat = int(data.get("node", 0))
+            except (TypeError, ValueError):
+                return jsonify({"status": "error", "message": "Invalid node value"}), 400
+            if rhapi.race.status != RaceStatus.RACING:
+                return jsonify({"status": "ignored", "reason": "race not running"}), 200
+
+            race_start = rhapi.race.start_time_internal
+            try:
+                if data.get("timestampMs") is not None:
+                    timestamp = int(data["timestampMs"]) / 1000.0
+                elif data.get("raceTimeMs") is not None:
+                    timestamp = race_start + int(data["raceTimeMs"]) / 1000.0
+                else:
+                    timestamp = monotonic()
+            except (TypeError, ValueError):
+                timestamp = monotonic()
+            if timestamp < race_start:
+                return jsonify({"status": "ignored", "reason": "timestamp before race start"}), 200
+
+            # lap_add() pushes its own app context; run it outside this request's.
+            gevent.spawn(self._legacy_lap, seat, timestamp)
+            return jsonify({"status": "ok", "seat": seat, "timestamp_ms": int((timestamp - race_start) * 1000)}), 200
+
+        return bp
+
+    def _legacy_lap(self, seat, timestamp):
+        try:
+            self._rhapi.race.lap_add(seat, timestamp)
+        except Exception:
+            logger.exception("FPVGate: error recording lap for seat %d", seat)
+
 
 def initialize(rhapi):
-    global _rhapi
-    _rhapi = rhapi
-    logger.info("FPVGate plugin v%s initialized", PLUGIN_VERSION)
-
-    # Settings panel on the RH Settings page
-    rhapi.ui.register_panel("fpvgate", "FPVGate", "settings", order=0)
-    rhapi.fields.register_option(
-        UIField(
-            name=OPT_HOST_IP,
-            label="FPVGate IP Address",
-            field_type=UIFieldType.TEXT,
-            value="",
-            desc=(
-                "IP address of FPVGate (e.g. 192.168.0.158). "
-                "Leave blank to use auto-detection from incoming lap posts."
-            ),
-            placeholder="e.g. 192.168.0.158",
-        ),
-        panel="fpvgate",
-    )
-
-    # FPVGate -> RH: clock sync endpoint
-    # FPVGate GETs this periodically to compute its clock offset against RH's
-    # monotonic clock.  The response is {"monotonic_ms": <int>} where the value
-    # is Python's time.monotonic() * 1000 -- the same time base that
-    # rhapi.race.start_time_internal uses.
-    @APP.route("/fpvgate/time", methods=["GET"])
-    def fpvgate_time():
-        return jsonify({"monotonic_ms": int(monotonic() * 1000)}), 200
-
-    # FPVGate -> RH: lap recording endpoint
-    @APP.route("/fpvgate/lap", methods=["POST"])
-    def fpvgate_record_lap():
-        global _fpvgate_ip
-        detected = request.remote_addr
-        # Only update auto-detected IP if no static IP is configured
-        configured = (rhapi.db.option(OPT_HOST_IP) or "").strip()
-        if not configured:
-            _fpvgate_ip = detected
-            logger.debug("[FPVGate] IP auto-detected: %s", _fpvgate_ip)
-        else:
-            logger.debug("[FPVGate] Lap from %s (using configured IP %s)", detected, configured)
-
-        # Parse request data while still in the Flask request context
-        data = request.get_json(silent=True)
-        if not data or not isinstance(data, dict):
-            return jsonify({"status": "error", "message": "Invalid JSON payload"}), 400
-
-        try:
-            seat_index = int(data.get("node", 0))
-        except (TypeError, ValueError):
-            return jsonify({"status": "error", "message": "Invalid node value"}), 400
-
-        if rhapi.race.status != RaceStatus.RACING:
-            logger.info(
-                "[FPVGate] Lap for seat %d ignored - race not running (status=%s)",
-                seat_index, rhapi.race.status,
-            )
-            return jsonify({"status": "ignored", "reason": "race not running"}), 200
-
-        # Resolve timestamp now, before leaving request context.
-        # Prefer timestampMs (absolute RH monotonic ms, sent when FPVGate has
-        # a synced clock offset).  Fall back to raceTimeMs + race_start for
-        # firmware that has not yet performed a clock sync.
-        timestamp_ms = data.get("timestampMs")
-        race_time_ms = data.get("raceTimeMs")
-        race_start   = rhapi.race.start_time_internal  # absolute monotonic seconds
-        if timestamp_ms is not None:
-            try:
-                timestamp_abs = int(timestamp_ms) / 1000.0
-            except (TypeError, ValueError):
-                timestamp_abs = monotonic()
-        elif race_time_ms is not None:
-            try:
-                timestamp_abs = race_start + int(race_time_ms) / 1000.0
-            except (TypeError, ValueError):
-                timestamp_abs = monotonic()
-        else:
-            timestamp_abs = monotonic()
-
-        if timestamp_abs < race_start:
-            logger.warning(
-                "[FPVGate] Timestamp before race start for seat %d - ignoring",
-                seat_index,
-            )
-            return jsonify({"status": "ignored", "reason": "timestamp before race start"}), 200
-
-        # Spawn lap recording outside the Flask request context so that
-        # add_lap()'s internal APP.app_context().push() doesn't conflict.
-        gevent.spawn(_record_lap, rhapi, seat_index, timestamp_abs)
-        elapsed_ms = int((timestamp_abs - race_start) * 1000)
-        return jsonify({"status": "ok", "seat": seat_index, "timestamp_ms": elapsed_ms}), 200
-
-    # RH -> FPVGate: race lifecycle events (priority=200 = async, non-blocking)
-    rhapi.events.on(Evt.RACE_STAGE,  _on_race_stage,  name="fpvgate_stage",  priority=200)
-    rhapi.events.on(Evt.RACE_START,  _on_race_start,  name="fpvgate_start",  priority=200)
-    rhapi.events.on(Evt.RACE_FINISH, _on_race_stop,   name="fpvgate_finish", priority=200)
-    rhapi.events.on(Evt.RACE_STOP,   _on_race_stop,   name="fpvgate_stop",   priority=200)
-    rhapi.events.on(Evt.RACE_ABORT,  _on_race_stop,   name="fpvgate_abort",  priority=200)
-    rhapi.events.on(Evt.LAPS_CLEAR,  _on_laps_clear,  name="fpvgate_clear",  priority=200)
-
-
-# ---------------------------------------------------------------------------
-# RH -> FPVGate: outbound race control
-# ---------------------------------------------------------------------------
-
-def _get_fpvgate_ip():
-    """Return the FPVGate IP: configured static IP first, then auto-detected."""
-    if _rhapi:
-        configured = (_rhapi.db.option(OPT_HOST_IP) or "").strip()
-        if configured:
-            return configured
-    return _fpvgate_ip
-
-
-def _post_to_fpvgate(path):
-    """Fire-and-forget HTTP POST to FPVGate (static or auto-detected IP)."""
-    ip = _get_fpvgate_ip()
-    if not ip:
-        logger.debug("[FPVGate] No IP known yet, skipping POST %s", path)
-        return
-    url = f"http://{ip}:{FPVGATE_PORT}{path}"
-    try:
-        req = urllib.request.Request(
-            url,
-            data=b"{}",
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=FPVGATE_HTTP_TIMEOUT) as resp:
-            logger.info("[FPVGate] POST %s -> HTTP %d", path, resp.status)
-    except Exception as exc:
-        logger.warning("[FPVGate] POST %s failed: %s", path, exc)
-
-
-def _on_race_stage(args):
-    _post_to_fpvgate("/timer/clearLaps")
-    _post_to_fpvgate("/timer/countdown")
-
-
-def _on_race_start(args):
-    _post_to_fpvgate("/timer/start")
-
-
-def _on_race_stop(args):
-    _post_to_fpvgate("/timer/stop")
-
-
-def _on_laps_clear(args):
-    _post_to_fpvgate("/timer/clearLaps")
-
-
-# ---------------------------------------------------------------------------
-# FPVGate -> RH: inbound lap recording
-# ---------------------------------------------------------------------------
-
-def _record_lap(rhapi, seat_index, timestamp_abs):
-    """Record a lap in a greenlet, outside any Flask request context.
-
-    add_lap() internally calls APP.app_context().push(). Running it here
-    (in a spawned greenlet with no existing context) avoids the
-    'Popped wrong app context' AssertionError that occurs when the same
-    call is made directly from within a Flask route handler.
-
-    timestamp_abs is an absolute monotonic time (seconds since boot),
-    as expected by RHRace.add_lap().
-    """
-    try:
-        rhapi.race.lap_add(seat_index, timestamp_abs)
-        logger.info(
-            "[FPVGate] Lap recorded: seat=%d, abs_ts=%.3f",
-            seat_index, timestamp_abs,
-        )
-    except Exception:
-        logger.exception("[FPVGate] Error recording lap for seat %d", seat_index)
+    logger.info("FPVGate plugin %s", PLUGIN_VERSION)
+    FPVGateProvider(rhapi)
