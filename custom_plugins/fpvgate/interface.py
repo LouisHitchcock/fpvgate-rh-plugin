@@ -16,6 +16,8 @@ builds). The plugin talks to it over HTTP:
         rhRssi  {"rssi": [...], "in"}   every node's RSSI (0-255) ten times a
                                         second; "in" has bit n set while node
                                         n is inside the gate
+    C5 gates that report "rawMax" in /api/rh/info also send "rawPeak" and
+    "raw": [...], the same RSSI at full resolution (0-1023, levels x 4).
 
 Passes carry the gate's own timestamp, so network delay does not affect lap
 times; only the clock offset does, and that is measured continuously.
@@ -60,7 +62,7 @@ class FPVGateNode(Node):
         # RotorHazard's newest node API: enter/exit levels, 0-255 RSSI.
         self.api_level = 35
         self.init()
-        self.max_rssi_value = RSSI_MAX
+        self.max_rssi_value = RSSI_MAX + 1   # readings must be below this
         # Set once RotorHazard has chosen the value, so a reconnect pushes
         # RotorHazard's choice to the gate instead of adopting the gate's.
         self.rh_frequency = False
@@ -68,7 +70,8 @@ class FPVGateNode(Node):
 
 
 class FPVGateInterface(BaseHardwareInterface):
-    def __init__(self, address, node_count, status_callback=None, info=None, frequencies_callback=None):
+    def __init__(self, address, node_count, status_callback=None, info=None, frequencies_callback=None,
+                 full_rssi=False):
         super().__init__()
         self.address = address
         # Called with the nodes after the gate's frequencies were adopted on
@@ -76,11 +79,16 @@ class FPVGateInterface(BaseHardwareInterface):
         self.frequencies_callback = frequencies_callback
         self._ever_connected = False
         self._nodes = [FPVGateNode(i) for i in range(node_count)]
+        # With full_rssi, RotorHazard sees the C5's 0..1023 RSSI and levels;
+        # the gate stores levels as 0..255, so they are scaled by 4 each way.
+        self.full_rssi = full_rssi
+        self.scale = 1
+        self._set_scale(info)
         # The gate's settings from startup, so RotorHazard starts from them.
         for node, slot in zip(self._nodes, (info or {}).get("nodes", [])):
             node.frequency = slot.get("frequency", 0)
-            node.enter_at_level = slot.get("enter", 0)
-            node.exit_at_level = slot.get("exit", 0)
+            node.enter_at_level = slot.get("enter", 0) * self.scale
+            node.exit_at_level = slot.get("exit", 0) * self.scale
         self.marshal_type = MarshalType.PASS_PEAK_ONLY
         self.ready_failure_msg = "FPVGate is not connected. Check the gate, then reconnect in Settings."
         self.status_callback = status_callback
@@ -92,6 +100,21 @@ class FPVGateInterface(BaseHardwareInterface):
         self._running = False
         self._threads = []
         self._session = requests.Session()
+
+    def _set_scale(self, info):
+        """Pick the RSSI scale from the gate's info, until the first connection
+        fixes it (RotorHazard's levels are in that scale from then on)."""
+        if not info or self._ever_connected:
+            return
+        raw_max = info.get("rawMax")
+        if self.full_rssi and not raw_max:
+            logger.warning("FPVGate firmware %s has no full-resolution RSSI; using 0-255", info.get("version", "?"))
+        self.scale = (raw_max + 1) // (RSSI_MAX + 1) if self.full_rssi and raw_max else 1
+        for node in self._nodes:
+            node.max_rssi_value = (RSSI_MAX + 1) * self.scale
+
+    def _to_gate(self, level):
+        return max(0, min(RSSI_MAX, round(int(level) / self.scale)))
 
     @property
     def nodes(self):
@@ -193,7 +216,9 @@ class FPVGateInterface(BaseHardwareInterface):
                     response.raise_for_status()
                     self._set_connected(True)
                     event, data = None, []
-                    for line in response.iter_lines(decode_unicode=True):
+                    # chunk_size=1: the default 512 waits for ~7 events and
+                    # delivers them in bursts about a second apart.
+                    for line in response.iter_lines(chunk_size=1, decode_unicode=True):
                         if not self._running:
                             break
                         if line is None:
@@ -214,18 +239,21 @@ class FPVGateInterface(BaseHardwareInterface):
 
     def _apply_info(self, info):
         self.info = info
+        self._set_scale(info)
+        scale = self.scale
         for node, slot in zip(self._nodes, info.get("nodes", [])):
             if node.rh_frequency:
                 self._push(node, frequency=node.frequency)
             else:
                 node.frequency = slot.get("frequency", 0)
+            enter, exit = slot.get("enter", 0) * scale, slot.get("exit", 0) * scale
             if node.rh_levels:
-                self._push(node, enter=node.enter_at_level, exit=node.exit_at_level)
-            elif not self._ever_connected or (slot.get("enter"), slot.get("exit")) != (node.enter_at_level, node.exit_at_level):
+                self._push(node, enter=self._to_gate(node.enter_at_level), exit=self._to_gate(node.exit_at_level))
+            elif not self._ever_connected or (enter, exit) != (node.enter_at_level, node.exit_at_level):
                 # Adopt the gate's levels and have RotorHazard store them in
                 # its profile and show them.
-                node.enter_at_level = slot.get("enter", 0)
-                node.exit_at_level = slot.get("exit", 0)
+                node.enter_at_level = enter
+                node.exit_at_level = exit
                 if callable(self.new_enter_or_exit_at_callback):
                     gevent.spawn(self.new_enter_or_exit_at_callback, node, True)
                     gevent.spawn(self.new_enter_or_exit_at_callback, node, False)
@@ -248,7 +276,7 @@ class FPVGateInterface(BaseHardwareInterface):
         if not 0 <= index < len(self._nodes) or self._offset is None:
             return
         node = self._nodes[index]
-        peak = msg.get("peak", 0)
+        peak = msg.get("rawPeak", 0) if self.scale > 1 else msg.get("peak", 0)
         if peak:
             node.pass_peak_rssi = peak
             node.node_peak_rssi = max(peak, node.node_peak_rssi)
@@ -259,7 +287,8 @@ class FPVGateInterface(BaseHardwareInterface):
     def _on_rssi(self, msg):
         readtime = monotonic()
         inside = msg.get("in", 0)
-        for index, rssi in enumerate(msg.get("rssi", [])):
+        values = msg.get("raw", []) if self.scale > 1 else msg.get("rssi", [])
+        for index, rssi in enumerate(values):
             if index >= len(self._nodes):
                 break
             node = self._nodes[index]
@@ -320,9 +349,7 @@ class FPVGateInterface(BaseHardwareInterface):
             return node.enter_at_level
         node.rh_levels = True
         node.enter_at_level = int(level)
-        stored = self._push(node, enter=node.enter_at_level, exit=node.exit_at_level)
-        if stored:
-            node.exit_at_level = stored.get("exit", node.exit_at_level)
+        self._push_levels(node)
         return node.enter_at_level
 
     def transmit_exit_at_level(self, node, level):
@@ -334,10 +361,16 @@ class FPVGateInterface(BaseHardwareInterface):
             return node.exit_at_level
         node.rh_levels = True
         node.exit_at_level = int(level)
-        stored = self._push(node, enter=node.enter_at_level, exit=node.exit_at_level)
-        if stored:
-            node.exit_at_level = stored.get("exit", node.exit_at_level)
+        self._push_levels(node)
         return node.exit_at_level
+
+    def _push_levels(self, node):
+        """Send a node's levels to the gate and keep the levels it stored.
+        Full-resolution levels land on the gate's 0..255 steps (4 apart)."""
+        stored = self._push(node, enter=self._to_gate(node.enter_at_level), exit=self._to_gate(node.exit_at_level))
+        if stored:
+            node.enter_at_level = stored.get("enter", self._to_gate(node.enter_at_level)) * self.scale
+            node.exit_at_level = stored.get("exit", self._to_gate(node.exit_at_level)) * self.scale
 
     #
     # Not applicable to FPVGate

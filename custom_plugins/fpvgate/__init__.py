@@ -26,7 +26,7 @@ from .interface import FPVGateInterface, get_info
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "2.0.0"
+PLUGIN_VERSION = "2.1.2"
 SECTION = "FPVGate"
 PANEL = "fpvgate"
 DEFAULT_NODES = 8
@@ -57,6 +57,17 @@ class FPVGateProvider:
         self._legacy_address = None
 
         rhapi.config.register_section(SECTION)
+
+        # Ask the gate how many nodes it has before registering the fields:
+        # once node_count is registered with persistent_restart, every write
+        # to it raises RotorHazard's "restart to apply" banner.
+        address = self._address()
+        node_count = rhapi.config.get(SECTION, "node_count", as_int=True) or DEFAULT_NODES
+        info = get_info(address, timeout=3.0) if address else None
+        if info and info.get("nodes") and len(info["nodes"]) != node_count:
+            node_count = len(info["nodes"])
+            rhapi.config.set(SECTION, "node_count", node_count)
+
         rhapi.ui.register_panel(PANEL, "FPVGate", "settings")
         rhapi.fields.register_option(
             UIField(
@@ -95,16 +106,28 @@ class FPVGateProvider:
             ),
             panel=PANEL,
         )
+        rhapi.fields.register_option(
+            UIField(
+                name="full_rssi",
+                label="Full-resolution RSSI",
+                field_type=UIFieldType.CHECKBOX,
+                value="0",
+                desc="Show a C5 gate's RSSI as 0-1023 instead of 0-255, for finer graphs. EnterAt/ExitAt "
+                     "switch to the same scale and snap to steps of 4. Restart RotorHazard after changing it.",
+                persistent_section=SECTION,
+                persistent_restart=True,
+            ),
+            panel=PANEL,
+        )
 
-        address = self._address()
-        node_count = rhapi.config.get(SECTION, "node_count", as_int=True) or DEFAULT_NODES
-        info = get_info(address, timeout=3.0) if address else None
-        if info and info.get("nodes"):
-            node_count = len(info["nodes"])
-            rhapi.config.set(SECTION, "node_count", node_count)
         self.interface = FPVGateInterface(address, node_count if address else 0, self._update_status, info,
-                                          self._adopt_frequencies)
+                                          self._adopt_frequencies, full_rssi=self._option("full_rssi"))
         rhapi.interface.add(self.interface)
+        if address:
+            logger.info("FPVGate: %d nodes at %s (%s at startup)", len(self.interface.nodes), address,
+                        "reached" if info else "not reached")
+        else:
+            logger.warning("FPVGate: no address set, so no nodes; set it in Settings and restart RotorHazard")
 
         rhapi.events.on(Evt.STARTUP, self._startup)
         rhapi.events.on(Evt.SHUTDOWN, self._shutdown)
@@ -170,7 +193,8 @@ class FPVGateProvider:
             info = iface.info or {}
             sync = f"{iface.sync_ms:.1f} ms" if iface.sync_ms is not None else "syncing"
             text = (f"**Connected** to {info.get('board', 'FPVGate')} at {iface.address}, "
-                    f"firmware {info.get('version', '?')}, {len(iface.nodes)} nodes, clock within {sync}.")
+                    f"firmware {info.get('version', '?')}, {len(iface.nodes)} nodes, "
+                    f"RSSI 0-{256 * iface.scale - 1}, clock within {sync}.")
         elif self._legacy_address:
             text = (f"Receiving laps from version 1 firmware at {self._legacy_address}. "
                     f"Update the gate to 1.9.0 or later for every pilot, live RSSI and tuning from RotorHazard.")
@@ -198,9 +222,12 @@ class FPVGateProvider:
         except Exception as exc:
             logger.warning("FPVGate POST %s failed: %s", path, exc)
 
-    def _mirror(self):
-        value = self._rhapi.config.get(SECTION, "mirror_race")
+    def _option(self, name):
+        value = self._rhapi.config.get(SECTION, name)
         return str(value) not in ("0", "False", "false", "")
+
+    def _mirror(self):
+        return self._option("mirror_race")
 
     def _race_stage(self, _args):
         if self._mirror():
@@ -274,6 +301,33 @@ class FPVGateProvider:
             logger.exception("FPVGate: error recording lap for seat %d", seat)
 
 
+def keep_plugin_interfaces(rhapi):
+    """RotorHazard 4.5.1-dev clears every timing interface before setting up
+    its own, which runs after plugins have added theirs: the gate's nodes are
+    dropped and RotorHazard finds none. Put plugin interfaces back straight
+    after the clear, ahead of RotorHazard's own, as before. Does nothing on
+    versions without clear_interfaces(). Remove once RotorHazard keeps them."""
+    try:
+        from interface_mapper import InterfaceType
+        mapper = rhapi._racecontext.interface
+        clear = mapper.clear_interfaces
+    except (ImportError, AttributeError):
+        return
+    if getattr(clear, "keeps_plugin_interfaces", False):
+        return   # another plugin (or a reload) already did this
+
+    def clear_interfaces():
+        kept = [m.interface for m in mapper.mapped_interfaces if m.type == InterfaceType.RHAPI]
+        clear()
+        for interface in kept:
+            mapper.add_interface(interface, InterfaceType.RHAPI)
+
+    clear_interfaces.keeps_plugin_interfaces = True
+    mapper.clear_interfaces = clear_interfaces
+    logger.info("FPVGate: keeping plugin timing interfaces through RotorHazard's interface reset")
+
+
 def initialize(rhapi):
     logger.info("FPVGate plugin %s", PLUGIN_VERSION)
+    keep_plugin_interfaces(rhapi)
     FPVGateProvider(rhapi)

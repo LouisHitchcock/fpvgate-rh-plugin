@@ -21,7 +21,7 @@ An FPVGate with an ESP32-C5 receiver times up to eight pilots from one gate; an 
 Community catalogue inclusion is pending. Once approved, open **Settings > Plugins > Browse Community Plugins** in RotorHazard, find **FPVGate** and install it. Until then, use the manual installation below.
 
 ### Manual
-1. Download the source ZIP from the [v2.0.0 release](https://github.com/LouisHitchcock/fpvgate-rh-plugin/releases/tag/v2.0.0), extract it, and copy `custom_plugins/fpvgate/` into your RotorHazard data `plugins/` folder (e.g. `~/rh-data/plugins/fpvgate/`). If upgrading, replace the existing `fpvgate` plugin folder rather than installing a second copy.
+1. Download the source ZIP from the [latest release](https://github.com/LouisHitchcock/fpvgate-rh-plugin/releases/latest), extract it, and copy `custom_plugins/fpvgate/` into your RotorHazard data `plugins/` folder (e.g. `~/rh-data/plugins/fpvgate/`). If upgrading, replace the existing `fpvgate` plugin folder rather than installing a second copy.
 2. Restart RotorHazard.
 
 ## Setup
@@ -35,6 +35,8 @@ Nothing needs setting on the gate.
 On the first connection, the gate's frequencies and enter/exit levels are copied into RotorHazard's current profile. Subsequent frequency and threshold changes in RotorHazard are sent to the gate. An ESP32-C5 gate tunes 5180 to 5917 MHz; a node set outside that range is switched off and RotorHazard logs a warning.
 
 **Run races on the gate too** (on by default) also starts, stops and clears the gate's own race, so its display, LEDs and speaker follow RotorHazard. Turn it off to use the gate purely as a receiver.
+
+**Full-resolution RSSI** (off by default) shows an ESP32-C5 gate's RSSI as 0-1023 instead of 0-255, for finer graphs in Sensor Tuning. EnterAt and ExitAt switch to the same scale and snap to steps of 4, the gate's own steps. Restart RotorHazard after changing it. It needs gate firmware that reports `rawMax` in `/api/rh/info` (later than 1.9.0-Multi-Alpha-2); with older firmware the plugin logs a warning and stays on 0-255.
 
 ## Testing status
 
@@ -55,7 +57,7 @@ The clock offset comes from the poll with the fastest round trip among the last 
 
 ## Version 1 firmware
 
-Firmware before 1.9.0 POSTs laps to the plugin itself (`/fpvgate/lap`, clock sync from `/fpvgate/time`). That still works: set the gate's Race Synchronization role to RotorHazard with this computer's IP and the pilot's seat. Only one pilot is timed that way; update the gate for all of them.
+Firmware before 1.9.0 POSTs laps to the plugin itself (`/fpvgate/lap`, clock sync from `/fpvgate/time`). That still works: set the gate's Race Synchronization role to RotorHazard with this computer's IP and the pilot's seat. Only one pilot is timed that way; update the gate for all of them. Firmware after 1.9.0-Multi-Alpha-2 no longer has that role, because the plugin connects to the gate instead.
 
 ## License
 
