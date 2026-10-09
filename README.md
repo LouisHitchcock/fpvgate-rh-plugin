@@ -12,16 +12,16 @@ An FPVGate with an ESP32-C5 receiver times up to eight pilots from one gate; an 
 ## Requirements
 
 - RotorHazard 4.4.0 or later
-- FPVGate firmware 1.9.0 or later (older firmware still works the version 1 way, see below)
+- FPVGate firmware [v1.9.0-Multi-Alpha-2](https://github.com/LouisHitchcock/FPVGate/releases/tag/v1.9.0-Multi-Alpha-2) or later for the hardware interface (older firmware still works the version 1 way, see below)
 - The gate and RotorHazard on the same network
 
 ## Installation
 
-### Community Plugins (recommended)
-In RotorHazard, open **Settings > Plugins > Browse Community Plugins**, find **FPVGate** and install it.
+### Community Plugins
+Community catalogue inclusion is pending. Once approved, open **Settings > Plugins > Browse Community Plugins** in RotorHazard, find **FPVGate** and install it. Until then, use the manual installation below.
 
 ### Manual
-1. Copy `custom_plugins/fpvgate/` into your RotorHazard data `plugins/` folder (e.g. `~/rh-data/plugins/fpvgate/`).
+1. Download the source ZIP from the [v2.0.0 release](https://github.com/LouisHitchcock/fpvgate-rh-plugin/releases/tag/v2.0.0), extract it, and copy `custom_plugins/fpvgate/` into your RotorHazard data `plugins/` folder (e.g. `~/rh-data/plugins/fpvgate/`). If upgrading, replace the existing `fpvgate` plugin folder rather than installing a second copy.
 2. Restart RotorHazard.
 
 ## Setup
@@ -32,9 +32,13 @@ In RotorHazard, open **Settings > Plugins > Browse Community Plugins**, find **F
 
 Nothing needs setting on the gate.
 
-Frequencies come from RotorHazard's frequency setup and profiles, and replace the gate's own. An ESP32-C5 gate tunes 5180 to 5917 MHz; a node set outside that range is switched off and RotorHazard logs a warning. Enter and exit levels start from the gate's and are then adjusted in RotorHazard as usual.
+On the first connection, the gate's frequencies and enter/exit levels are copied into RotorHazard's current profile. Subsequent frequency and threshold changes in RotorHazard are sent to the gate. An ESP32-C5 gate tunes 5180 to 5917 MHz; a node set outside that range is switched off and RotorHazard logs a warning.
 
 **Run races on the gate too** (on by default) also starts, stops and clears the gate's own race, so its display, LEDs and speaker follow RotorHazard. Turn it off to use the gate purely as a receiver.
+
+## Testing status
+
+The companion Multi-Alpha-2 firmware is a testing release. Release testing covered a Seeed XIAO ESP32S3 with an ESP32-C5 receiver over USB networking, including 28 RotorHazard races. Physical eight-pilot race testing is still outstanding. The Waveshare ESP32-S3-ETH firmware has not been tested on hardware.
 
 ## How it works
 
