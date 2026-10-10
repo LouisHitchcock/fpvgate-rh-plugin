@@ -1,6 +1,13 @@
-# FPVGate RotorHazard Plugin v2.1.3
+# FPVGate RotorHazard Plugin v2.1.4
 
 Use an FPVGate as RotorHazard timing hardware: up to eight nodes with an ESP32-C5 receiver, or one with RX5808.
+
+## Changes since v2.1.3
+
+- **Marshal page works.** The gate now declares full RSSI marshaling, so RotorHazard's Marshal page shows each node's RSSI trace and can recalculate laps from new Enter/Exit levels, instead of a graph made up from the lap peaks.
+- **No more pass floods.** A dip in the signal as a quad flies through could reach RotorHazard as several passes in a fraction of a second, and enough of them could overwhelm RotorHazard during a race. Passes for a node less than 0.5 s apart are now treated as one. Firmware 1.9.0-Multi-Alpha-3 and later fixes this at the gate as well, and sends RSSI 20 times a second with every peak kept, for a cleaner Marshal trace.
+- **RSSI keeps flowing when RotorHazard is busy.** Passes used to be handed to RotorHazard by the same task that reads the gate's RSSI, so when RotorHazard fell behind, the RSSI waited too and the Marshal trace slipped against the laps. Passes now wait in their own queue. If more than 64 back up, new ones are dropped, a warning is logged and shown in the FPVGate panel. Their RSSI is still recorded, so the Marshal page can recalculate those laps.
+- Firmware that timestamps its RSSI messages (`"us"` in `rhRssi`) has its RSSI timed by the gate rather than on arrival.
 
 ## Changes since v2.1.2
 

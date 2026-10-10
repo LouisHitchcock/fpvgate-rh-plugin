@@ -13,9 +13,13 @@ builds). The plugin talks to it over HTTP:
     GET  /api/rh/events server-sent events (api 2; api 1 firmware sends them
                         on the browser's /events among its own):
         rhPass  {"node", "us", "peak"}  a pass, timed at its RSSI peak
-        rhRssi  {"rssi": [...], "in"}   every node's RSSI (0-255) ten times a
-                                        second; "in" has bit n set while node
-                                        n is inside the gate
+        rhRssi  {"rssi": [...], "in"}   every node's RSSI (0-255), 10 times a
+                                        second (20 from 1.9.0-Multi-Alpha-3,
+                                        each the highest since the last); "in"
+                                        has bit n set while node n is inside
+                                        the gate. With "us" (gate clock) the
+                                        reading is timed by the gate, else on
+                                        arrival
     C5 gates that report "rawMax" in /api/rh/info also send "rawPeak" and
     "raw": [...], the same RSSI at full resolution (0-1023, levels x 4).
 
@@ -29,6 +33,7 @@ from collections import deque
 from time import monotonic
 
 import gevent
+import gevent.queue
 import requests
 
 from BaseHardwareInterface import BaseHardwareInterface, PeakNadirHistory, MarshalType
@@ -37,11 +42,22 @@ from Node import Node
 logger = logging.getLogger(__name__)
 
 HTTP_TIMEOUT_S = 2.0
-STREAM_TIMEOUT_S = (3.0, 20.0)  # connect, read (the gate sends RSSI 10 times a second)
+STREAM_TIMEOUT_S = (3.0, 20.0)  # connect, read (the gate sends RSSI 10-20 times a second)
 CLOCK_POLL_S = 5.0              # the gate drops the link after 15 s without a poll
 CLOCK_WINDOW = 12               # recent clock samples; the fastest round trip wins
 RECONNECT_S = 3.0
 RSSI_MAX = 255
+# A node's passes closer together than this are fragments of one fly-through
+# (gates before 1.9.0-Multi-Alpha-3 report each multipath dip as a pass); the
+# first is kept. No real lap is this short.
+PASS_FRAGMENT_S = 0.5
+# Passes waiting for RotorHazard. Handing a pass over blocks while
+# RotorHazard's own queue is full, so it happens away from the stream reader,
+# which would otherwise stop reading RSSI too. Beyond this many waiting, new
+# passes are dropped (and counted): their RSSI is still recorded, so the
+# Marshal page can recalculate them.
+PASS_BACKLOG_MAX = 64
+OVERLOAD_LOG_S = 5.0            # at most one overload warning this often
 
 
 def get_info(address, timeout=HTTP_TIMEOUT_S):
@@ -89,7 +105,15 @@ class FPVGateInterface(BaseHardwareInterface):
             node.frequency = slot.get("frequency", 0)
             node.enter_at_level = slot.get("enter", 0) * self.scale
             node.exit_at_level = slot.get("exit", 0) * self.scale
-        self.marshal_type = MarshalType.PASS_PEAK_ONLY
+        # The RSSI history (every node, 10-20 times a second) is what
+        # RotorHazard's Marshal page recalculates laps from.
+        self.marshal_type = MarshalType.FULL_RSSI
+        self._last_pass_s = {}   # node index -> gate time of its last pass, for PASS_FRAGMENT_S
+        self._passes = gevent.queue.Queue(maxsize=PASS_BACKLOG_MAX)
+        self.passes_dropped = 0
+        self.pass_backlog_peak = 0
+        self._overload_logged_s = None
+        self._pass_thread = None
         self.ready_failure_msg = "FPVGate is not connected. Check the gate, then reconnect in Settings."
         self.status_callback = status_callback
         self.info = None
@@ -137,6 +161,9 @@ class FPVGateInterface(BaseHardwareInterface):
             return None
         self._running = True
         self._threads = [gevent.spawn(self._stream_loop), gevent.spawn(self._clock_loop)]
+        # Outlives reconnects: killing it mid-handoff would lose that pass.
+        if self._pass_thread is None or self._pass_thread.dead:
+            self._pass_thread = gevent.spawn(self._pass_loop)
         return True
 
     def stop(self):
@@ -276,16 +303,50 @@ class FPVGateInterface(BaseHardwareInterface):
         if not 0 <= index < len(self._nodes) or self._offset is None:
             return
         node = self._nodes[index]
+        pass_s = msg["us"] / 1e6
+        last = self._last_pass_s.get(index)
+        if last is not None and 0 <= pass_s - last < PASS_FRAGMENT_S:
+            logger.debug("FPVGate node %d: pass %.3f s after the last one ignored", index + 1, pass_s - last)
+            return
+        self._last_pass_s[index] = pass_s
         peak = msg.get("rawPeak", 0) if self.scale > 1 else msg.get("peak", 0)
         if peak:
             node.pass_peak_rssi = peak
             node.node_peak_rssi = max(peak, node.node_peak_rssi)
-        if callable(self.pass_record_callback):
-            self.pass_record_callback(node, self.server_time(msg["us"]), BaseHardwareInterface.LAP_SOURCE_REALTIME,
-                                      peak=peak or None)
+        try:
+            self._passes.put_nowait((node, self.server_time(msg["us"]), peak or None))
+        except gevent.queue.Full:
+            self.passes_dropped += 1
+            self._report_overload()
+            return
+        self.pass_backlog_peak = max(self.pass_backlog_peak, self._passes.qsize())
+
+    def _pass_loop(self):
+        """Hand passes to RotorHazard, in the order the gate sent them."""
+        while True:
+            node, timestamp, peak = self._passes.get()
+            if not callable(self.pass_record_callback):
+                continue
+            try:
+                self.pass_record_callback(node, timestamp, BaseHardwareInterface.LAP_SOURCE_REALTIME, peak=peak)
+            except Exception:
+                logger.exception("FPVGate: RotorHazard failed to record a pass for node %d", node.local_index + 1)
+
+    def _report_overload(self):
+        now = monotonic()
+        if self._overload_logged_s is not None and now - self._overload_logged_s < OVERLOAD_LOG_S:
+            return
+        logger.warning("FPVGate: RotorHazard is not keeping up with the gate's passes; %d dropped so far. "
+                       "Their RSSI is still recorded: recalculate laps on the Marshal page, and check the "
+                       "Enter/Exit levels.", self.passes_dropped)
+        self._overload_logged_s = now
+        if self.status_callback:
+            gevent.spawn(self.status_callback)
 
     def _on_rssi(self, msg):
-        readtime = monotonic()
+        # Timed by the gate when it says when, so a slow read doesn't shift
+        # the Marshal trace against the passes.
+        readtime = self.server_time(msg["us"]) if "us" in msg and self._offset is not None else monotonic()
         inside = msg.get("in", 0)
         values = msg.get("raw", []) if self.scale > 1 else msg.get("rssi", [])
         for index, rssi in enumerate(values):

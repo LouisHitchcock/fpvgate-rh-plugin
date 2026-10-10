@@ -51,7 +51,9 @@ The plugin registers an FPVGate hardware interface with RotorHazard and talks to
 | `GET /api/rh/info` | firmware, receiver, frequency range and each node's frequency and levels |
 | `GET /api/rh/clock` | the gate's clock. Polled every 5 seconds to keep the clocks in step; while it is polled, the gate reports every pass |
 | `POST /api/rh/node` | set one node's frequency and enter/exit levels |
-| `GET /api/rh/events` | server-sent events for the plugin only: `rhPass` (a pass, timed at its RSSI peak) and `rhRssi` (every node, 10 times a second) |
+| `GET /api/rh/events` | server-sent events for the plugin only: `rhPass` (a pass, timed at its RSSI peak) and `rhRssi` (every node, 20 times a second, each the highest RSSI since the last; 10 on older firmware) |
+
+RotorHazard keeps that RSSI history for each race (the gate declares full RSSI marshaling), so the Marshal page can show the trace and recalculate laps from new Enter/Exit levels.
 
 The clock offset comes from the poll with the fastest round trip among the last 12, so it follows crystal drift over a long event.
 

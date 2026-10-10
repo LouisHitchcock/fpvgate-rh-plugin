@@ -26,7 +26,7 @@ from .interface import FPVGateInterface, get_info
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "2.1.3"
+PLUGIN_VERSION = "2.1.4"
 SECTION = "FPVGate"
 PANEL = "fpvgate"
 DEFAULT_NODES = 8
@@ -217,6 +217,10 @@ class FPVGateProvider:
             text = (f"**Connected** to {info.get('board', 'FPVGate')} at {iface.address}, "
                     f"firmware {info.get('version', '?')}, {len(iface.nodes)} nodes, "
                     f"RSSI 0-{256 * iface.scale - 1}, clock within {sync}.")
+            if iface.passes_dropped:
+                text += (f"\n\n**{iface.passes_dropped} passes dropped**: RotorHazard couldn't keep up with "
+                         f"them. Their RSSI was recorded, so recalculate laps on the Marshal page, and check "
+                         f"the Enter/Exit levels aren't so low that noise counts as passes.")
         elif self._legacy_address:
             text = (f"Receiving laps from version 1 firmware at {self._legacy_address}. "
                     f"Update the gate to 1.9.0 or later for every pilot, live RSSI and tuning from RotorHazard.")
