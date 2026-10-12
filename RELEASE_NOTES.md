@@ -23,7 +23,7 @@ Use an FPVGate as RotorHazard timing hardware: up to eight nodes with an ESP32-C
 
 ## Requirements
 
-Requires RotorHazard 4.4.0 or later (tested on 4.4.0 and 4.5.0-beta.1). The hardware interface requires FPVGate v1.9.0-Multi-Alpha-2 or later; that firmware remains an alpha. Physical eight-pilot race testing is outstanding, and Waveshare S3-ETH firmware is untested on hardware.
+Requires RotorHazard 4.4.0 or later (tested on 4.4.0 and 4.5.0-beta.1). The hardware interface requires FPVGate v1.9.0-Multi-Alpha-2 or later, and v1.9.0-Multi-Alpha-3 is recommended; that firmware remains an alpha. Physical eight-pilot race testing is outstanding.
 
 Community Plugins catalogue inclusion is pending maintainer approval. For now, download the source ZIP below and copy `custom_plugins/fpvgate/` into `~/rh-data/plugins/fpvgate/`, replacing an existing copy when upgrading, then restart RotorHazard. Set the gate's IP address in Settings > FPVGate and restart again.
 
