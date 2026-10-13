@@ -87,12 +87,15 @@ class FPVGateNode(Node):
 
 class FPVGateInterface(BaseHardwareInterface):
     def __init__(self, address, node_count, status_callback=None, info=None, frequencies_callback=None,
-                 full_rssi=False):
+                 full_rssi=False, frequency_changed_callback=None):
         super().__init__()
         self.address = address
         # Called with the nodes after the gate's frequencies were adopted on
         # the first connection, for RotorHazard's profile to follow them.
         self.frequencies_callback = frequencies_callback
+        # Called with a node whenever its frequency changes, for split gates
+        # to follow it.
+        self.frequency_changed_callback = frequency_changed_callback
         self._ever_connected = False
         self._nodes = [FPVGateNode(i) for i in range(node_count)]
         # With full_rssi, RotorHazard sees the C5's 0..1023 RSSI and levels;
@@ -271,8 +274,9 @@ class FPVGateInterface(BaseHardwareInterface):
         for node, slot in zip(self._nodes, info.get("nodes", [])):
             if node.rh_frequency:
                 self._push(node, frequency=node.frequency)
-            else:
+            elif node.frequency != slot.get("frequency", 0):
                 node.frequency = slot.get("frequency", 0)
+                self._frequency_changed(node)
             enter, exit = slot.get("enter", 0) * scale, slot.get("exit", 0) * scale
             if node.rh_levels:
                 self._push(node, enter=self._to_gate(node.enter_at_level), exit=self._to_gate(node.exit_at_level))
@@ -396,7 +400,12 @@ class FPVGateInterface(BaseHardwareInterface):
             logger.warning("FPVGate can't tune node %d to %s MHz (range %s-%s); it is off",
                            node_index + 1, frequency, (self.info or {}).get("minMhz"), (self.info or {}).get("maxMhz"))
             node.frequency = stored.get("frequency", 0)
+        self._frequency_changed(node)
         return None
+
+    def _frequency_changed(self, node):
+        if callable(self.frequency_changed_callback):
+            gevent.spawn(self.frequency_changed_callback, node)
 
     def transmit_enter_at_level(self, node, level):
         return level
@@ -484,3 +493,67 @@ class FPVGateInterface(BaseHardwareInterface):
 
     def get_intf_error_report_str(self, forceFlag=False):
         return None
+
+
+class FPVGateSplitInterface(FPVGateInterface):
+    """A gate part way round the course, for split times.
+
+    It is not added to RotorHazard as timing hardware, so its nodes are not
+    seats. Its node i follows the finish gate's node i (the same pilot, so the
+    same frequency), and its passes are handed to split_callback as
+    (gate, node index, RotorHazard monotonic time) to become that pilot's
+    split. It keeps its own Enter/Exit levels, set on the gate itself: a
+    different gate sees each pilot at a different strength.
+    """
+
+    def __init__(self, split_id, address, finish, split_callback, status_callback=None):
+        super().__init__(address, 0, status_callback)
+        self.split_id = split_id
+        self.finish = finish
+        self.split_callback = split_callback
+
+    def _apply_info(self, info):
+        self.info = info
+        slots = info.get("nodes", [])
+        if len(slots) != len(self._nodes):
+            self._nodes = [FPVGateNode(i) for i in range(len(slots))]
+        for node, slot in zip(self._nodes, slots):
+            node.frequency = slot.get("frequency", 0)
+            node.enter_at_level = slot.get("enter", 0)
+            node.exit_at_level = slot.get("exit", 0)
+            self.follow(node.local_index)
+        self._ever_connected = True
+
+    def follow(self, index):
+        """Tune node index to the finish gate's node index (off if the finish
+        gate has no such node)."""
+        if not 0 <= index < len(self._nodes):
+            return
+        node = self._nodes[index]
+        finish_nodes = self.finish.nodes
+        frequency = finish_nodes[index].frequency if index < len(finish_nodes) else 0
+        if node.frequency == frequency:
+            return
+        stored = self._push(node, frequency=frequency)
+        if stored is not None:
+            node.frequency = stored.get("frequency", 0)
+            if node.frequency != frequency:
+                logger.warning("FPVGate split %d at %s can't tune node %d to %s MHz; it is off",
+                               self.split_id + 1, self.address, index + 1, frequency)
+
+    def _on_rssi(self, msg):
+        # Not RotorHazard's nodes, so no history or crossing callbacks: just
+        # the latest reading, for the status panel.
+        inside = msg.get("in", 0)
+        for index, (node, rssi) in enumerate(zip(self._nodes, msg.get("rssi", []))):
+            node.current_rssi = rssi
+            node.crossing_flag = bool(inside >> index & 1)
+
+    def _pass_loop(self):
+        while True:
+            node, timestamp, _peak = self._passes.get()
+            try:
+                self.split_callback(self, node.local_index, timestamp)
+            except Exception:
+                logger.exception("FPVGate split %d: failed to record a split for node %d",
+                                 self.split_id + 1, node.local_index + 1)

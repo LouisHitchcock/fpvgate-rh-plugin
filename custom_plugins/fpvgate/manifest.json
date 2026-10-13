@@ -2,7 +2,7 @@
   "domain": "fpvgate",
   "name": "FPVGate",
   "description": "Use an FPVGate lap timer as RotorHazard timing hardware: up to eight pilots on one ESP32-C5 gate, live RSSI, and frequencies and enter/exit levels set from RotorHazard.",
-  "version": "2.1.4",
+  "version": "2.2.0",
   "required_rhapi_version": "1.4",
   "author": "Louis Hitchcock",
   "author_uri": "https://github.com/LouisHitchcock",
