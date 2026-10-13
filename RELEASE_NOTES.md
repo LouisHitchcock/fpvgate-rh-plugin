@@ -4,7 +4,7 @@ Use an FPVGate as RotorHazard timing hardware: up to eight nodes with an ESP32-C
 
 ## Changes since v2.1.4
 
-- **Split gates.** More FPVGates part way round the course give each pilot split times. Each split gate becomes a RotorHazard split timer, so RotorHazard records, shows, announces and saves its splits exactly as for its own secondary timers, with speeds if you give the distances. Enter the split gates in **Settings > FPVGate > Split Gates**, in course order. Each is tuned to the finish gate's frequencies and follows RotorHazard's changes; set its Enter/Exit levels on the gate itself. See [Split times](https://github.com/LouisHitchcock/fpvgate-rh-plugin#split-times).
+- **Split gates.** More FPVGates part way round the course give each pilot split times. Each split gate becomes a RotorHazard split timer, so RotorHazard records, shows, announces and saves its splits exactly as for its own secondary timers, with speeds if you give the distances. Add them in **Settings > FPVGate**, a row each with **Add Split Gate**, in course order. Each is tuned to the finish gate's frequencies and follows RotorHazard's changes; set its Enter/Exit levels on the gate itself. See [Split times](https://github.com/LouisHitchcock/fpvgate-rh-plugin#split-times).
 - Split gates need RotorHazard with split timers for plugins (RHAPI 1.10). On older RotorHazard the FPVGate panel says so and everything else works as before.
 - Race start, stop and clear go to the split gates as well, when **Run races on the gate too** is on.
 

@@ -43,11 +43,12 @@ On the first connection, the gate's frequencies and enter/exit levels are copied
 More FPVGates part way round the course give each pilot split times. RotorHazard records them as its own split timers: on the Race page, announced, saved with the race, and with a speed if you give the distance between gates. This needs RotorHazard with split timers for plugins (RHAPI 1.10); on older versions the FPVGate panel says so, and lap timing works as before.
 
 1. Set up the start/finish gate as above.
-2. In **Settings > FPVGate**, enter the split gates' addresses in **Split Gates**, in the order pilots pass them, separated by commas (e.g. `192.168.4.2, 192.168.4.3`), and restart RotorHazard. The FPVGate panel shows each split gate's connection.
+2. In **Settings > FPVGate**, enter the first split gate's address in **Split Gate 1**. For more split gates, press **Add Split Gate** for another row; add them in the order pilots pass them. Restart RotorHazard. The FPVGate panel shows each split gate's connection.
 3. Each split gate's node 1 follows the finish gate's node 1, node 2 follows node 2, and so on: they are tuned to the same frequencies, and follow changes made in RotorHazard. A split gate with fewer nodes (an RX5808 gate has one) times the first seats only.
 4. Set each split gate's Enter/Exit levels on the gate's own web page: each gate sees a pilot at a different strength.
-5. Optional: **Split Distances**, the distance to each split gate from the gate before it, gives a speed for each split (metres give m/s, metres x 3.6 give km/h). **Split Callouts** chooses what is announced.
-6. If you also use RotorHazard secondary timers as split timers, set **First Split Number** to the number after theirs.
+5. Optional: a **Split Distance** for each gate, the distance from the gate before it, gives a speed for each split (metres give m/s, metres x 3.6 give km/h). **Split Callouts** chooses what is announced.
+6. To remove a split gate, clear its address and restart RotorHazard: its row goes, and the split gates after it move up a number.
+7. If you also use RotorHazard secondary timers as split timers, set **First Split Number** to the number after theirs.
 
 RotorHazard decides what counts as a split, as for its own split timers: split 1 after each lap pass, then each split after the one before; a split out of order or after a missed one is ignored, and there must be a pilot in the seat.
 

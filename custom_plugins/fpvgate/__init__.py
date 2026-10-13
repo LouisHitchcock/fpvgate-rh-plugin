@@ -42,9 +42,6 @@ BANDS = {
     "L": [5362, 5399, 5436, 5473, 5510, 5547, 5584, 5621],
 }
 
-def split_list(text):
-    return [item.strip() for item in (text or "").replace(";", ",").split(",") if item.strip()]
-
 
 def band_channel(frequency):
     for band, channels in BANDS.items():
@@ -127,22 +124,6 @@ class FPVGateProvider:
 
         rhapi.fields.register_option(
             UIField(
-                name="split_gates",
-                label="Split Gates",
-                field_type=UIFieldType.TEXT,
-                value="",
-                desc="Addresses of FPVGates part way round the course, in the order pilots pass them, separated "
-                     "by commas. Each gate's passes become split times. Set each split gate's Enter/Exit levels "
-                     "on the gate itself. Needs RotorHazard with split timers for plugins (RHAPI 1.10). "
-                     "Restart RotorHazard after changing it.",
-                placeholder="192.168.4.2, 192.168.4.3",
-                persistent_section=SECTION,
-                persistent_restart=True,
-            ),
-            panel=PANEL,
-        )
-        rhapi.fields.register_option(
-            UIField(
                 name="first_split",
                 label="First Split Number",
                 field_type=UIFieldType.NUMBER,
@@ -151,21 +132,6 @@ class FPVGateProvider:
                      "give the first splits; then set it to the number after theirs. Restart RotorHazard after "
                      "changing it.",
                 html_attributes={"min": 1, "max": 16},
-                persistent_section=SECTION,
-                persistent_restart=True,
-            ),
-            panel=PANEL,
-        )
-        rhapi.fields.register_option(
-            UIField(
-                name="split_distances",
-                label="Split Distances",
-                field_type=UIFieldType.TEXT,
-                value="",
-                desc="Optional: the distance to each split gate from the gate before it, separated by commas, "
-                     "for split speeds. A speed is the distance divided by the seconds taken: metres give m/s, "
-                     "metres x 3.6 give km/h. Restart RotorHazard after changing it.",
-                placeholder="40, 55",
                 persistent_section=SECTION,
                 persistent_restart=True,
             ),
@@ -186,6 +152,12 @@ class FPVGateProvider:
             ),
             panel=PANEL,
         )
+        # A row per split gate, in course order, after the other settings so
+        # a row added with Add Split Gate lands under the last one.
+        split_rows = self._compact_split_rows()
+        self._split_row_count = 0
+        for _ in range(max(1, len(split_rows))):
+            self._add_split_row_fields()
 
         self.interface = FPVGateInterface(address, node_count if address else 0, self._update_status, info,
                                           self._adopt_frequencies, full_rssi=self._option("full_rssi"),
@@ -193,7 +165,7 @@ class FPVGateProvider:
         rhapi.interface.add(self.interface)
         self.splits = []
         self._splits_unsupported = False
-        self._add_split_gates(split_list(rhapi.config.get(SECTION, "split_gates")))
+        self._add_split_gates(split_rows)
         if address:
             logger.info("FPVGate: %d nodes at %s (%s at startup)", len(self.interface.nodes), address,
                         "reached" if info else "not reached")
@@ -220,6 +192,7 @@ class FPVGateProvider:
 
     def _startup(self, _args):
         self._rhapi.ui.register_quickbutton(PANEL, "fpvgate-reconnect", "Reconnect", self._reconnect)
+        self._rhapi.ui.register_quickbutton(PANEL, "fpvgate-add-split", "Add Split Gate", self._add_split_row)
         self._check_nodes_kept()
         # RotorHazard starts the finish gate as its timing hardware; the split
         # gates are the plugin's own.
@@ -373,11 +346,68 @@ class FPVGateProvider:
         for split in self.splits:
             split.follow(node.local_index)
 
-    def _add_split_gates(self, addresses):
+    def _compact_split_rows(self):
+        """The split gates' (address, distance) rows, with empty rows dropped
+        and the rest closed up, so split numbers have no gaps. Saved back
+        before the row fields are registered: a change to a registered
+        restart field raises RotorHazard's restart banner."""
+        config = self._rhapi.config
+        count = config.get(SECTION, "split_rows", as_int=True) or 0
+        stored = [((config.get(SECTION, f"split_{n}_address") or "").strip(),
+                   (config.get(SECTION, f"split_{n}_distance") or "").strip()) for n in range(1, count + 1)]
+        rows = [row for row in stored if row[0]]
+        if rows != stored:
+            for n in range(1, count + 1):
+                address, distance = rows[n - 1] if n <= len(rows) else ("", "")
+                config.set(SECTION, f"split_{n}_address", address)
+                config.set(SECTION, f"split_{n}_distance", distance)
+            config.set(SECTION, "split_rows", len(rows))
+        return rows
+
+    def _add_split_row_fields(self):
+        self._split_row_count += 1
+        n = self._split_row_count
+        self._rhapi.fields.register_option(
+            UIField(
+                name=f"split_{n}_address",
+                label=f"Split Gate {n}",
+                field_type=UIFieldType.TEXT,
+                value="",
+                desc=f"Address of the FPVGate for split {n}. Clear it to remove this split gate. "
+                     f"Restart RotorHazard after changing it.",
+                placeholder="192.168.4.2",
+                persistent_section=SECTION,
+                persistent_restart=True,
+            ),
+            panel=PANEL,
+        )
+        self._rhapi.fields.register_option(
+            UIField(
+                name=f"split_{n}_distance",
+                label=f"Split {n} Distance",
+                field_type=UIFieldType.TEXT,
+                value="",
+                desc="Optional, for speeds: the distance from the gate before. Metres give m/s, metres x 3.6 "
+                     "give km/h.",
+                placeholder="40",
+                persistent_section=SECTION,
+                persistent_restart=True,
+            ),
+            panel=PANEL,
+        )
+        # Rows up to here are read at the next start, filled in or not.
+        if (self._rhapi.config.get(SECTION, "split_rows", as_int=True) or 0) < n:
+            self._rhapi.config.set(SECTION, "split_rows", n)
+
+    def _add_split_row(self, _args=None):
+        self._add_split_row_fields()
+        self._rhapi.ui.broadcast_ui("settings")
+
+    def _add_split_gates(self, rows):
         """A RotorHazard split timer for each split gate, numbered from First
         Split Number in course order. RotorHazard records their passes as
         splits by its own rules, as for its secondary timers."""
-        if not addresses:
+        if not rows:
             return
         if not hasattr(self._rhapi.race, "split_add"):
             self._splits_unsupported = True
@@ -385,16 +415,15 @@ class FPVGateProvider:
                            "this one has RHAPI %s.%s", self._rhapi.API_VERSION_MAJOR, self._rhapi.API_VERSION_MINOR)
             return
         first = (self._rhapi.config.get(SECTION, "first_split", as_int=True) or 1) - 1
-        distances = split_list(self._rhapi.config.get(SECTION, "split_distances"))
         callout = self._rhapi.config.get(SECTION, "split_callout")
-        for i, address in enumerate(addresses):
+        for i, (address, distance) in enumerate(rows):
             settings = {} if callout in (None, "auto") else {"callout": callout}
-            if i < len(distances):
+            if distance:
                 try:
-                    settings["distance"] = float(distances[i])
+                    settings["distance"] = float(distance)
                 except ValueError:
                     logger.warning("FPVGate: split distance '%s' isn't a number; no speed for split %d",
-                                   distances[i], first + i + 1)
+                                   distance, first + i + 1)
             if self._rhapi.race.split_timer_add(first + i, settings):
                 self.splits.append(FPVGateSplitInterface(first + i, address, self.interface, self._record_split,
                                                          self._update_status))
