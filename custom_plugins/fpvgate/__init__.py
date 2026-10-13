@@ -121,6 +121,20 @@ class FPVGateProvider:
             ),
             panel=PANEL,
         )
+        rhapi.fields.register_option(
+            UIField(
+                name="led_gate",
+                label="LED Gate Address",
+                field_type=UIFieldType.TEXT,
+                value="",
+                desc="Optional: an FPVGate LED Controller to follow RotorHazard's races: a green flash at the "
+                     "start, a red flash at the end, a white flash on every lap.",
+                placeholder="192.168.4.20",
+                persistent_section=SECTION,
+            ),
+            panel=PANEL,
+        )
+        self._led_race_running = False
 
         rhapi.fields.register_option(
             UIField(
@@ -178,6 +192,7 @@ class FPVGateProvider:
         rhapi.events.on(Evt.RACE_STOP, self._race_stop, priority=200)
         rhapi.events.on(Evt.RACE_ABORT, self._race_stop, priority=200)
         rhapi.events.on(Evt.LAPS_CLEAR, self._laps_clear, priority=200)
+        rhapi.events.on(Evt.RACE_LAP_RECORDED, self._lap_recorded, priority=200)
 
         rhapi.ui.blueprint_add(self._legacy_blueprint())
 
@@ -329,14 +344,37 @@ class FPVGateProvider:
     def _race_start(self, _args):
         if self._mirror():
             self._post("/timer/start")
+        self._led_race_running = True
+        self._led("/RaceStart")
 
     def _race_stop(self, _args):
         if self._mirror():
             self._post("/timer/stop")
+        # A race that runs to time finishes and then stops: one flash.
+        if self._led_race_running:
+            self._led_race_running = False
+            self._led("/RaceStop")
 
     def _laps_clear(self, _args):
         if self._mirror():
             self._post("/timer/clearLaps")
+
+    def _lap_recorded(self, _args):
+        self._led("/Lap")
+
+    def _led(self, path):
+        """An FPVGate LED Controller call, in the background: an LED gate that
+        is off mustn't hold up the race."""
+        address = (self._rhapi.config.get(SECTION, "led_gate") or "").strip()
+        if address:
+            gevent.spawn(self._led_call, address, path)
+
+    @staticmethod
+    def _led_call(address, path):
+        try:
+            requests.get(f"http://{address}{path}", timeout=HTTP_TIMEOUT_S)
+        except Exception as exc:
+            logger.debug("FPVGate LED gate %s%s failed: %s", address, path, exc)
 
     #
     # Split gates
