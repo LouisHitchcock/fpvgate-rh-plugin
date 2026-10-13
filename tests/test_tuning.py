@@ -1,5 +1,4 @@
 """Protocol and calibration regressions using mocked gates; no device connections."""
-import base64
 import os
 import sys
 import unittest
@@ -18,7 +17,6 @@ from flask import Flask
 import FlaskAppObj
 FlaskAppObj.APP = Flask('mock-rh-plugin-tests')
 import Results  # RH initializes Results before the mutually dependent race/UI modules.
-from custom_plugins.fpvgate import FPVGateProvider
 from custom_plugins.fpvgate import interface
 
 
@@ -156,22 +154,6 @@ class GateTuningTest(unittest.TestCase):
         split._push.return_value = {}
         self.assertFalse(split.set_levels(0, 110, 50)['ok'])
         self.assertEqual(split.nodes[0].enter_at_level, 100)
-
-    def test_fallback_routes_authenticate_and_reject_fractional_levels(self):
-        split = self.split()
-        values = {'ADMIN_USERNAME': 'test-admin', 'ADMIN_PASSWORD': 'test-password'}
-        provider = SimpleNamespace(_rhapi=SimpleNamespace(config=SimpleNamespace(get=lambda section, key: values[key])), splits=[split])
-        app = Flask('fallback-test')
-        app.register_blueprint(FPVGateProvider._tuning_blueprint(provider))
-        client = app.test_client()
-        self.assertEqual(client.get('/fpvgate/api/split-tuning').status_code, 401)
-        headers = {'Authorization': 'Basic ' + base64.b64encode(b'test-admin:test-password').decode()}
-        self.assertEqual(client.get('/fpvgate/api/split-tuning', headers=headers).status_code, 200)
-        response = client.post('/fpvgate/api/split-tuning/0/0', json={'enter': 72.9, 'exit': 68}, headers=headers)
-        self.assertEqual(response.status_code, 400)
-        split._push.assert_not_called()
-        self.assertEqual(client.post('/fpvgate/api/split-tuning/0/0', json={'enter': 100, 'exit': 50}, headers=headers).status_code, 200)
-
 
 if __name__ == '__main__':
     unittest.main()

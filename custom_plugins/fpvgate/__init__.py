@@ -12,12 +12,11 @@ way: it POSTs laps to /fpvgate/lap and syncs its clock from /fpvgate/time.
 
 import json
 import logging
-from hmac import compare_digest
 from time import monotonic
 
 import gevent
 import requests
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, jsonify, request
 
 from eventmanager import Evt
 from RHRace import RaceStatus
@@ -201,7 +200,6 @@ class FPVGateProvider:
         rhapi.events.on(Evt.RACE_LAP_RECORDED, self._lap_recorded, priority=200)
 
         rhapi.ui.blueprint_add(self._legacy_blueprint())
-        rhapi.ui.blueprint_add(self._tuning_blueprint())
 
     def _address(self):
         return (self._rhapi.config.get(SECTION, "address") or "").strip()
@@ -312,55 +310,12 @@ class FPVGateProvider:
             if callable(getattr(self._rhapi.ui, "register_sensor_tuning", None)):
                 text += "\n\nTune split receivers in **Settings > Sensor Tuning**."
             else:
-                text += "\n\n[Open split-gate live tuning graphs](/fpvgate/split-tuning)"
+                text += "\n\nConfigure split thresholds on the gate, or upgrade RH for Sensor Tuning integration."
         errors = [node.frequency_error for node in iface.nodes if node.frequency_error]
         if errors:
             text += "\n\n**Frequency update failed:** " + " ".join(errors)
         self._rhapi.ui.register_markdown(PANEL, "fpvgate_status", text)
         self._rhapi.ui.broadcast_ui("settings", replace_panels=False)
-
-    def _tuning_blueprint(self):
-        bp = Blueprint("fpvgate_tuning", __name__, template_folder="templates")
-
-        def authorized():
-            username = self._rhapi.config.get("SECRETS", "ADMIN_USERNAME") or ""
-            password = self._rhapi.config.get("SECRETS", "ADMIN_PASSWORD") or ""
-            if not username and not password:
-                return True
-            auth = request.authorization
-            return bool(auth and auth.type == "basic" and isinstance(auth.username, str)
-                        and isinstance(auth.password, str) and compare_digest(auth.username.encode(), username.encode())
-                        and compare_digest(auth.password.encode(), password.encode()))
-
-        @bp.route("/fpvgate/split-tuning", methods=["GET"])
-        def split_tuning_page():
-            if not authorized():
-                return "Authentication required", 401, {"WWW-Authenticate": 'Basic realm="Login Required"'}
-            return render_template("split_tuning.html")
-
-        @bp.route("/fpvgate/api/split-tuning", methods=["GET"])
-        def split_tuning_data():
-            if not authorized():
-                return jsonify({"error": "Authentication required"}), 401
-            return jsonify({"splits": [split.tuning_snapshot() for split in self.splits]})
-
-        @bp.route("/fpvgate/api/split-tuning/<int:split_id>/<int:node_index>", methods=["POST"])
-        def set_split_tuning(split_id, node_index):
-            if not authorized():
-                return jsonify({"error": "Authentication required"}), 401
-            data = request.get_json(silent=True)
-            if not isinstance(data, dict):
-                return jsonify({"error": "Invalid JSON payload"}), 400
-            enter, exit = data.get("enter"), data.get("exit")
-            if type(enter) is not int or type(exit) is not int:
-                return jsonify({"error": "Enter and Exit must be whole numbers"}), 400
-            split = next((item for item in self.splits if item.split_id == split_id), None)
-            if split is None:
-                return jsonify({"error": "Unknown split gate"}), 404
-            result = split.set_levels(node_index, enter, exit)
-            return jsonify(result), 200 if result["ok"] else 400
-
-        return bp
 
     #
     # RotorHazard -> gate race control

@@ -561,7 +561,6 @@ class FPVGateSplitInterface(FPVGateInterface):
         self.split_id = split_id
         self.finish = finish
         self.split_callback = split_callback
-        self._tuning_history = []
         self._captures = {}
 
     def _set_connected(self, connected):
@@ -574,7 +573,6 @@ class FPVGateSplitInterface(FPVGateInterface):
         slots = info.get("nodes", [])
         if len(slots) != len(self._nodes):
             self._nodes = [FPVGateNode(i) for i in range(len(slots))]
-            self._tuning_history = [deque(maxlen=240) for _ in slots]
         for node, slot in zip(self._nodes, slots):
             node.frequency = slot.get("frequency", 0)
             node.enter_at_level = slot.get("enter", 0)
@@ -609,24 +607,6 @@ class FPVGateSplitInterface(FPVGateInterface):
             if capture is not None:
                 capture["total"] += rssi
                 capture["count"] += 1
-            if index < len(self._tuning_history):
-                self._tuning_history[index].append((monotonic(), int(rssi), node.crossing_flag))
-
-    def tuning_snapshot(self):
-        return {
-            "split": self.split_id,
-            "address": self.address,
-            "connected": self.connected,
-            "nodes": [{
-                "index": node.local_index,
-                "frequency": node.frequency,
-                "enter": node.enter_at_level,
-                "exit": node.exit_at_level,
-                "rssi": node.current_rssi,
-                "inside": node.crossing_flag,
-                "history": list(self._tuning_history[i]) if i < len(self._tuning_history) else [],
-            } for i, node in enumerate(self._nodes)],
-        }
 
     def sensor_tuning_snapshot(self):
         """RotorHazard's Sensor Tuning provider format; no network requests."""
