@@ -1,6 +1,12 @@
-# FPVGate RotorHazard Plugin v2.1.4
+# FPVGate RotorHazard Plugin v2.2.0
 
 Use an FPVGate as RotorHazard timing hardware: up to eight nodes with an ESP32-C5 receiver, or one with RX5808.
+
+## Changes since v2.1.4
+
+- **Split gates.** More FPVGates part way round the course give each pilot split times. Each split gate becomes a RotorHazard split timer, so RotorHazard records, shows, announces and saves its splits exactly as for its own secondary timers, with speeds if you give the distances. Enter the split gates in **Settings > FPVGate > Split Gates**, in course order. Each is tuned to the finish gate's frequencies and follows RotorHazard's changes; set its Enter/Exit levels on the gate itself. See [Split times](https://github.com/LouisHitchcock/fpvgate-rh-plugin#split-times).
+- Split gates need RotorHazard with split timers for plugins (RHAPI 1.10). On older RotorHazard the FPVGate panel says so and everything else works as before.
+- Race start, stop and clear go to the split gates as well, when **Run races on the gate too** is on.
 
 ## Changes since v2.1.3
 
@@ -23,7 +29,7 @@ Use an FPVGate as RotorHazard timing hardware: up to eight nodes with an ESP32-C
 
 ## Requirements
 
-Requires RotorHazard 4.4.0 or later (tested on 4.4.0 and 4.5.0-beta.1). The hardware interface requires FPVGate v1.9.0-Multi-Alpha-2 or later, and v1.9.0-Multi-Alpha-3 is recommended; that firmware remains an alpha. Physical eight-pilot race testing is outstanding.
+Requires RotorHazard 4.4.0 or later (tested on 4.4.0 and 4.5.0-beta.1); split gates need RotorHazard with RHAPI 1.10. The hardware interface requires FPVGate v1.9.0-Multi-Alpha-2 or later, and v1.9.0-Multi-Alpha-3 is recommended; that firmware remains an alpha. Physical eight-pilot race testing is outstanding.
 
 Community Plugins catalogue inclusion is pending maintainer approval. For now, download the source ZIP below and copy `custom_plugins/fpvgate/` into `~/rh-data/plugins/fpvgate/`, replacing an existing copy when upgrading, then restart RotorHazard. Set the gate's IP address in Settings > FPVGate and restart again.
 
