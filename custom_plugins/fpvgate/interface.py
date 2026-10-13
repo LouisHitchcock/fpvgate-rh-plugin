@@ -33,6 +33,7 @@ from collections import deque
 from time import monotonic
 
 import gevent
+import gevent.lock
 import gevent.queue
 import requests
 
@@ -127,6 +128,7 @@ class FPVGateInterface(BaseHardwareInterface):
         self._running = False
         self._threads = []
         self._session = requests.Session()
+        self._push_lock = gevent.lock.BoundedSemaphore()
 
     def _set_scale(self, info):
         """Pick the RSSI scale from the gate's info, until the first connection
@@ -377,8 +379,10 @@ class FPVGateInterface(BaseHardwareInterface):
         if not self.address:
             return None
         try:
-            response = self._session.post(f"http://{self.address}/api/rh/node",
-                                          json=dict(node=node.local_index, **values), timeout=HTTP_TIMEOUT_S)
+            # One at a time: each connection costs the gate memory.
+            with self._push_lock:
+                response = self._session.post(f"http://{self.address}/api/rh/node",
+                                              json=dict(node=node.local_index, **values), timeout=HTTP_TIMEOUT_S)
             response.raise_for_status()
             return response.json()
         except Exception as exc:
@@ -413,13 +417,17 @@ class FPVGateInterface(BaseHardwareInterface):
     # A level of 0 is RotorHazard having no value yet (a new profile sets
     # every node to 0 at startup): keep the gate's, which RotorHazard then
     # reads back into the profile.
+    # Unchanged levels aren't sent: RotorHazard sets back every level the
+    # plugin has just adopted from the gate, 16 at once for 8 nodes, and a
+    # XIAO's heap low-water mark was 3 KB after such a burst of connections.
     def set_enter_at_level(self, node_index, level):
         node = self._nodes[node_index]
         if not self._ever_connected or not level or int(level) <= 0:
             return node.enter_at_level
         node.rh_levels = True
-        node.enter_at_level = int(level)
-        self._push_levels(node)
+        if int(level) != node.enter_at_level:
+            node.enter_at_level = int(level)
+            self._push_levels(node)
         return node.enter_at_level
 
     def transmit_exit_at_level(self, node, level):
@@ -430,8 +438,9 @@ class FPVGateInterface(BaseHardwareInterface):
         if not self._ever_connected or not level or int(level) <= 0:
             return node.exit_at_level
         node.rh_levels = True
-        node.exit_at_level = int(level)
-        self._push_levels(node)
+        if int(level) != node.exit_at_level:
+            node.exit_at_level = int(level)
+            self._push_levels(node)
         return node.exit_at_level
 
     def _push_levels(self, node):
