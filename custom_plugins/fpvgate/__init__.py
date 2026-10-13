@@ -152,12 +152,10 @@ class FPVGateProvider:
             ),
             panel=PANEL,
         )
-        # A row per split gate, in course order, after the other settings so
-        # a row added with Add Split Gate lands under the last one.
+        # A settings row per split gate (registered at startup, after the
+        # panel's other settings and buttons); an empty one if there are none.
         split_rows = self._compact_split_rows()
-        self._split_row_count = 0
-        for _ in range(max(1, len(split_rows))):
-            self._add_split_row_fields()
+        self._set_split_row_count(max(1, len(split_rows)))
 
         self.interface = FPVGateInterface(address, node_count if address else 0, self._update_status, info,
                                           self._adopt_frequencies, full_rssi=self._option("full_rssi"),
@@ -193,6 +191,8 @@ class FPVGateProvider:
     def _startup(self, _args):
         self._rhapi.ui.register_quickbutton(PANEL, "fpvgate-reconnect", "Reconnect", self._reconnect)
         self._rhapi.ui.register_quickbutton(PANEL, "fpvgate-add-split", "Add Split Gate", self._add_split_row)
+        for n in range(1, self._split_row_count + 1):
+            self._register_split_row(n)
         self._check_nodes_kept()
         # RotorHazard starts the finish gate as its timing hardware; the split
         # gates are the plugin's own.
@@ -364,22 +364,23 @@ class FPVGateProvider:
             config.set(SECTION, "split_rows", len(rows))
         return rows
 
-    def _add_split_row_fields(self):
-        self._split_row_count += 1
-        n = self._split_row_count
+    def _register_split_row(self, n, shown=True):
+        """Split gate n's fields and Remove button, in the FPVGate panel or
+        hidden: RotorHazard can't delete a field or button, but one
+        registered again with no panel isn't shown."""
+        panel = PANEL if shown else None
         self._rhapi.fields.register_option(
             UIField(
                 name=f"split_{n}_address",
                 label=f"Split Gate {n}",
                 field_type=UIFieldType.TEXT,
                 value="",
-                desc=f"Address of the FPVGate for split {n}. Clear it to remove this split gate. "
-                     f"Restart RotorHazard after changing it.",
+                desc=f"Address of the FPVGate for split {n}. Restart RotorHazard after changing it.",
                 placeholder="192.168.4.2",
                 persistent_section=SECTION,
                 persistent_restart=True,
             ),
-            panel=PANEL,
+            panel=panel,
         )
         self._rhapi.fields.register_option(
             UIField(
@@ -393,14 +394,34 @@ class FPVGateProvider:
                 persistent_section=SECTION,
                 persistent_restart=True,
             ),
-            panel=PANEL,
+            panel=panel,
         )
-        # Rows up to here are read at the next start, filled in or not.
-        if (self._rhapi.config.get(SECTION, "split_rows", as_int=True) or 0) < n:
-            self._rhapi.config.set(SECTION, "split_rows", n)
+        self._rhapi.ui.register_quickbutton(panel, f"fpvgate-remove-split-{n}", f"Remove Split Gate {n}",
+                                            self._remove_split_row, n)
+
+    def _set_split_row_count(self, count):
+        # Rows up to this many are read at the next start, filled in or not.
+        self._split_row_count = count
+        if self._rhapi.config.get(SECTION, "split_rows", as_int=True) != count:
+            self._rhapi.config.set(SECTION, "split_rows", count)
 
     def _add_split_row(self, _args=None):
-        self._add_split_row_fields()
+        self._set_split_row_count(self._split_row_count + 1)
+        self._register_split_row(self._split_row_count)
+        self._rhapi.ui.broadcast_ui("settings")
+
+    def _remove_split_row(self, n):
+        """Removes split gate n: the gates after it move up a row, and the
+        last row is hidden. Takes effect when RotorHazard restarts, as the
+        split timers are added at start-up."""
+        config = self._rhapi.config
+        last = self._split_row_count
+        for k in range(n, last + 1):
+            for item in ("address", "distance"):
+                moved = config.get(SECTION, f"split_{k + 1}_{item}") if k < last else ""
+                config.set(SECTION, f"split_{k}_{item}", moved or "")
+        self._register_split_row(last, shown=False)
+        self._set_split_row_count(last - 1)
         self._rhapi.ui.broadcast_ui("settings")
 
     def _add_split_gates(self, rows):

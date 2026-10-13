@@ -47,7 +47,7 @@ More FPVGates part way round the course give each pilot split times. RotorHazard
 3. Each split gate's node 1 follows the finish gate's node 1, node 2 follows node 2, and so on: they are tuned to the same frequencies, and follow changes made in RotorHazard. A split gate with fewer nodes (an RX5808 gate has one) times the first seats only.
 4. Set each split gate's Enter/Exit levels on the gate's own web page: each gate sees a pilot at a different strength.
 5. Optional: a **Split Distance** for each gate, the distance from the gate before it, gives a speed for each split (metres give m/s, metres x 3.6 give km/h). **Split Callouts** chooses what is announced.
-6. To remove a split gate, clear its address and restart RotorHazard: its row goes, and the split gates after it move up a number.
+6. To remove a split gate, press its **Remove Split Gate** button and restart RotorHazard: its row goes, and the split gates after it move up a number. (Clearing its address does the same at the next restart.)
 7. If you also use RotorHazard secondary timers as split timers, set **First Split Number** to the number after theirs.
 
 RotorHazard decides what counts as a split, as for its own split timers: split 1 after each lap pass, then each split after the one before; a split out of order or after a missed one is ignored, and there must be a pilot in the seat.
