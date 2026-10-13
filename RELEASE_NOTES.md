@@ -1,3 +1,17 @@
+# FPVGate RotorHazard Plugin v2.3.1 (unreleased draft)
+
+- Split gates appear directly in **Settings > Sensor Tuning** on RotorHazard builds with the proposed receiver tuning API (RHAPI 1.11). Each split node has RH's graph, pause, crossing indicator, EnterAt/ExitAt controls, threshold dragging, and a three-second RSSI capture using receiver samples.
+- Split thresholds are saved independently to the selected gate; split receivers do not become extra pilot seats. Older RH builds keep the separate tuning page as a fallback.
+- Gate reboot/reconnect invalidates old clock samples before timestamped passes resume. Frequency caches retain confirmed settings when a hardware write fails, and pending frequencies are retried on reconnection.
+- Tuning routes use the public configuration API for authentication. Fractional and boolean thresholds are rejected. Split overload warnings no longer suggest recovery through Marshal.
+
+# FPVGate RotorHazard Plugin v2.3.0
+
+## Changes since v2.2.0
+
+- **Split-gate live tuning graphs.** Open the graph from Settings > FPVGate to see each split receiver's recent RSSI, crossing state and Enter/Exit levels. Adjust and save each node's thresholds directly to that split gate.
+- Split gate tuning is available only to authenticated RotorHazard users, and the graph keeps split receivers out of the pilot seat list.
+
 # FPVGate RotorHazard Plugin v2.2.0
 
 Use an FPVGate as RotorHazard timing hardware: up to eight nodes with an ESP32-C5 receiver, or one with RX5808.

@@ -23,8 +23,9 @@ builds). The plugin talks to it over HTTP:
     C5 gates that report "rawMax" in /api/rh/info also send "rawPeak" and
     "raw": [...], the same RSSI at full resolution (0-1023, levels x 4).
 
-Passes carry the gate's own timestamp, so network delay does not affect lap
-times; only the clock offset does, and that is measured continuously.
+Passes carry the gate's timestamp, converted with the measured clock offset.
+Network delay affects arrival order and admission near race boundaries, but
+is not added to the recorded timestamp.
 """
 
 import json
@@ -50,13 +51,14 @@ RECONNECT_S = 3.0
 RSSI_MAX = 255
 # A node's passes closer together than this are fragments of one fly-through
 # (gates before 1.9.0-Multi-Alpha-3 report each multipath dip as a pass); the
-# first is kept. No real lap is this short.
+# first is kept. Courses that revisit the same gate within 0.5 s need a
+# smaller filter interval; timestamps alone cannot distinguish a revisit.
 PASS_FRAGMENT_S = 0.5
 # Passes waiting for RotorHazard. Handing a pass over blocks while
 # RotorHazard's own queue is full, so it happens away from the stream reader,
 # which would otherwise stop reading RSSI too. Beyond this many waiting, new
-# passes are dropped (and counted): their RSSI is still recorded, so the
-# Marshal page can recalculate them.
+# passes are dropped (and counted). Main-gate RSSI can recover laps through
+# Marshal; split passes have no Marshal recovery path.
 PASS_BACKLOG_MAX = 64
 OVERLOAD_LOG_S = 5.0            # at most one overload warning this often
 
@@ -83,6 +85,8 @@ class FPVGateNode(Node):
         # Set once RotorHazard has chosen the value, so a reconnect pushes
         # RotorHazard's choice to the gate instead of adopting the gate's.
         self.rh_frequency = False
+        self.requested_frequency = None
+        self.frequency_error = None
         self.rh_levels = False
 
 
@@ -125,10 +129,12 @@ class FPVGateInterface(BaseHardwareInterface):
         self.sync_ms = None
         self._clock = deque(maxlen=CLOCK_WINDOW)
         self._offset = None
+        self._last_clock_reading = None
         self._running = False
         self._threads = []
         self._session = requests.Session()
         self._push_lock = gevent.lock.BoundedSemaphore()
+        self._clock_lock = gevent.lock.BoundedSemaphore()
 
     def _set_scale(self, info):
         """Pick the RSSI scale from the gate's info, until the first connection
@@ -184,6 +190,7 @@ class FPVGateInterface(BaseHardwareInterface):
             self.address = address
         self._clock.clear()
         self._offset = None
+        self._last_clock_reading = None
         return self.start()
 
     def _set_connected(self, connected):
@@ -203,15 +210,31 @@ class FPVGateInterface(BaseHardwareInterface):
     #
 
     def _sample_clock(self):
+        with self._clock_lock:
+            self._sample_clock_locked()
+
+    def _sample_clock_locked(self):
         t0 = monotonic()
         response = self._session.get(f"http://{self.address}/api/rh/clock", timeout=HTTP_TIMEOUT_S)
         t1 = monotonic()
         response.raise_for_status()
         gate_s = response.json()["us"] / 1e6
+        if self._last_clock_reading is not None and gate_s < self._last_clock_reading:
+            self._clock.clear()
+            self._last_pass_s.clear()
+            logger.info("FPVGate at %s restarted its clock; resynchronizing", self.address)
+        self._last_clock_reading = gate_s
         self._clock.append((t1 - t0, gate_s - (t0 + t1) / 2))
         rtt, offset = min(self._clock)
         self._offset = offset
         self.sync_ms = rtt * 500  # worst case error is half the round trip
+
+    def _resync_clock(self):
+        with self._clock_lock:
+            self._clock.clear()
+            self._offset = None
+            self._last_pass_s.clear()
+            self._sample_clock_locked()
 
     def _clock_loop(self):
         while self._running:
@@ -240,6 +263,8 @@ class FPVGateInterface(BaseHardwareInterface):
                 if not info:
                     raise ConnectionError("no answer from /api/rh/info")
                 self._apply_info(info)
+                # Obtain an offset from this connection before admitting timestamped passes.
+                self._resync_clock()
                 # The gate only serves event streams to clients that accept one.
                 path = "/api/rh/events" if info.get("api", 1) >= 2 else "/events"
                 with self._session.get(f"http://{self.address}{path}", stream=True,
@@ -275,7 +300,8 @@ class FPVGateInterface(BaseHardwareInterface):
         scale = self.scale
         for node, slot in zip(self._nodes, info.get("nodes", [])):
             if node.rh_frequency:
-                self._push(node, frequency=node.frequency)
+                node.frequency = slot.get("frequency", 0)
+                self._confirm_frequency(node, node.requested_frequency)
             elif node.frequency != slot.get("frequency", 0):
                 node.frequency = slot.get("frequency", 0)
                 self._frequency_changed(node)
@@ -342,9 +368,10 @@ class FPVGateInterface(BaseHardwareInterface):
         now = monotonic()
         if self._overload_logged_s is not None and now - self._overload_logged_s < OVERLOAD_LOG_S:
             return
-        logger.warning("FPVGate: RotorHazard is not keeping up with the gate's passes; %d dropped so far. "
-                       "Their RSSI is still recorded: recalculate laps on the Marshal page, and check the "
-                       "Enter/Exit levels.", self.passes_dropped)
+        recovery = ("Split passes cannot be recovered through Marshal." if isinstance(self, FPVGateSplitInterface)
+                    else "Their RSSI is recorded; laps can be recalculated on the Marshal page.")
+        logger.warning("FPVGate at %s: %d passes dropped. %s Check receiver thresholds and server load.",
+                       self.address, self.passes_dropped, recovery)
         self._overload_logged_s = now
         if self.status_callback:
             gevent.spawn(self.status_callback)
@@ -398,14 +425,28 @@ class FPVGateInterface(BaseHardwareInterface):
             return None
         node.rh_frequency = True
         node.debug_pass_count = 0
-        node.frequency = frequency
-        stored = self._push(node, frequency=frequency)
-        if stored is not None and stored.get("frequency") != frequency:
-            logger.warning("FPVGate can't tune node %d to %s MHz (range %s-%s); it is off",
-                           node_index + 1, frequency, (self.info or {}).get("minMhz"), (self.info or {}).get("maxMhz"))
-            node.frequency = stored.get("frequency", 0)
-        self._frequency_changed(node)
+        node.requested_frequency = frequency
+        self._confirm_frequency(node, frequency)
         return None
+
+    def _confirm_frequency(self, node, frequency):
+        stored = self._push(node, frequency=frequency)
+        if not isinstance(stored, dict) or type(stored.get("frequency")) is not int:
+            node.frequency_error = f"Node {node.local_index + 1}: could not confirm {frequency} MHz on the gate."
+            logger.warning("FPVGate at %s: %s", self.address, node.frequency_error)
+            if self.status_callback:
+                gevent.spawn(self.status_callback)
+            return False
+        previous_error = node.frequency_error
+        node.frequency = stored["frequency"]
+        node.frequency_error = (None if node.frequency == frequency else
+                                f"Node {node.local_index + 1}: requested {frequency} MHz; gate accepted {node.frequency} MHz.")
+        if previous_error != node.frequency_error and self.status_callback:
+            gevent.spawn(self.status_callback)
+        if node.frequency != frequency:
+            logger.warning("FPVGate at %s: %s", self.address, node.frequency_error)
+        self._frequency_changed(node)
+        return True
 
     def _frequency_changed(self, node):
         if callable(self.frequency_changed_callback):
@@ -520,12 +561,20 @@ class FPVGateSplitInterface(FPVGateInterface):
         self.split_id = split_id
         self.finish = finish
         self.split_callback = split_callback
+        self._tuning_history = []
+        self._captures = {}
+
+    def _set_connected(self, connected):
+        if not connected:
+            self._captures.clear()
+        super()._set_connected(connected)
 
     def _apply_info(self, info):
         self.info = info
         slots = info.get("nodes", [])
         if len(slots) != len(self._nodes):
             self._nodes = [FPVGateNode(i) for i in range(len(slots))]
+            self._tuning_history = [deque(maxlen=240) for _ in slots]
         for node, slot in zip(self._nodes, slots):
             node.frequency = slot.get("frequency", 0)
             node.enter_at_level = slot.get("enter", 0)
@@ -542,21 +591,106 @@ class FPVGateSplitInterface(FPVGateInterface):
         finish_nodes = self.finish.nodes
         frequency = finish_nodes[index].frequency if index < len(finish_nodes) else 0
         if node.frequency == frequency:
+            node.requested_frequency = frequency
+            node.frequency_error = None
             return
-        stored = self._push(node, frequency=frequency)
-        if stored is not None:
-            node.frequency = stored.get("frequency", 0)
-            if node.frequency != frequency:
-                logger.warning("FPVGate split %d at %s can't tune node %d to %s MHz; it is off",
-                               self.split_id + 1, self.address, index + 1, frequency)
+        node.requested_frequency = frequency
+        self._confirm_frequency(node, frequency)
 
     def _on_rssi(self, msg):
-        # Not RotorHazard's nodes, so no history or crossing callbacks: just
-        # the latest reading, for the status panel.
+        # Keep telemetry for Sensor Tuning without adding race seats.
         inside = msg.get("in", 0)
         for index, (node, rssi) in enumerate(zip(self._nodes, msg.get("rssi", []))):
             node.current_rssi = rssi
+            node.node_peak_rssi = max(rssi, node.node_peak_rssi)
+            node.node_nadir_rssi = min(rssi, node.node_nadir_rssi) if node.node_nadir_rssi else rssi
             node.crossing_flag = bool(inside >> index & 1)
+            capture = self._captures.get(index)
+            if capture is not None:
+                capture["total"] += rssi
+                capture["count"] += 1
+            if index < len(self._tuning_history):
+                self._tuning_history[index].append((monotonic(), int(rssi), node.crossing_flag))
+
+    def tuning_snapshot(self):
+        return {
+            "split": self.split_id,
+            "address": self.address,
+            "connected": self.connected,
+            "nodes": [{
+                "index": node.local_index,
+                "frequency": node.frequency,
+                "enter": node.enter_at_level,
+                "exit": node.exit_at_level,
+                "rssi": node.current_rssi,
+                "inside": node.crossing_flag,
+                "history": list(self._tuning_history[i]) if i < len(self._tuning_history) else [],
+            } for i, node in enumerate(self._nodes)],
+        }
+
+    def sensor_tuning_snapshot(self):
+        """RotorHazard's Sensor Tuning provider format; no network requests."""
+        return {
+            "address": self.address,
+            "connected": self.connected,
+            "max_rssi": 255,
+            "message": " ".join(node.frequency_error for node in self._nodes if node.frequency_error),
+            "nodes": [{
+                "index": node.local_index,
+                "frequency": node.frequency,
+                "enter": node.enter_at_level,
+                "exit": node.exit_at_level,
+                "rssi": node.current_rssi,
+                "inside": node.crossing_flag,
+                "peak": node.node_peak_rssi,
+                "nadir": node.node_nadir_rssi,
+            } for node in self._nodes],
+        }
+
+    def set_levels(self, node_index, enter, exit):
+        if not self.connected:
+            return {"ok": False, "message": "Split gate is not connected."}
+        if type(node_index) is not int or not 0 <= node_index < len(self._nodes):
+            return {"ok": False, "message": "Unknown split-gate node."}
+        if type(enter) is not int or type(exit) is not int or not 0 <= exit < enter <= 255:
+            return {"ok": False, "message": "Enter must be 1-255 and higher than Exit (0-254)."}
+
+        node = self._nodes[node_index]
+        if node_index in self._captures:
+            return {"ok": False, "message": "Wait for the current RSSI capture to finish."}
+        stored = self._push(node, enter=enter, exit=exit)
+        if not isinstance(stored, dict) or any(type(stored.get(key)) is not int for key in ("enter", "exit")):
+            return {"ok": False, "message": "The gate did not accept the threshold update."}
+        if not 0 <= stored["exit"] < stored["enter"] <= 255:
+            return {"ok": False, "message": "The gate returned invalid thresholds."}
+        node.enter_at_level = stored["enter"]
+        node.exit_at_level = stored["exit"]
+        return {"ok": True, "enter": node.enter_at_level, "exit": node.exit_at_level}
+
+    def capture_level(self, node_index, level):
+        """Average receiver samples for three seconds, matching RH's capture window."""
+        if level not in ("enter", "exit") or type(node_index) is not int or not 0 <= node_index < len(self._nodes):
+            return {"ok": False, "message": "Unknown receiver or threshold."}
+        if not self.connected or node_index in self._captures:
+            return {"ok": False, "message": "Receiver is disconnected or already capturing."}
+        capture = {"total": 0, "count": 0}
+        self._captures[node_index] = capture
+        try:
+            gevent.sleep(3.0)
+            if not self.connected or self._captures.get(node_index) is not capture:
+                return {"ok": False, "message": "Receiver disconnected during capture."}
+            if not capture["count"]:
+                return {"ok": False, "message": "No RSSI samples received during capture."}
+            node = self._nodes[node_index]
+            value = int(round(capture["total"] / capture["count"]))
+            if level == "enter" and node.node_peak_rssi > 0 and node.node_peak_rssi - value < 5:
+                value = node.node_peak_rssi - 5
+            del self._captures[node_index]
+            return self.set_levels(node_index, value if level == "enter" else node.enter_at_level,
+                                   value if level == "exit" else node.exit_at_level)
+        finally:
+            if self._captures.get(node_index) is capture:
+                del self._captures[node_index]
 
     def _pass_loop(self):
         while True:
