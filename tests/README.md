@@ -14,3 +14,14 @@ python -m unittest discover -s tests -p test_tuning.py
 
 Receiver sampling is injected during the three-second capture wait, so these
 checks are deterministic and do not measure radio detection accuracy.
+
+The older-RH graph page also has an intercepted-HTTP browser regression. With
+Node.js 18 or later, Playwright and Chromium available, run:
+
+```text
+node --test tests/test_tuning_page.cjs
+```
+
+`PLAYWRIGHT_MODULE` and `PLAYWRIGHT_CHROMIUM_EXECUTABLE` can select existing
+development installations. Every browser request is intercepted; this check
+does not connect to a physical gate or running RH installation.
