@@ -22,6 +22,11 @@ builds). The plugin talks to it over HTTP:
                                         arrival
     C5 gates that report "rawMax" in /api/rh/info also send "rawPeak" and
     "raw": [...], the same RSSI at full resolution (0-1023, levels x 4).
+    Newer C5 gates also send, in rhPass, "levelUs" (the pass timed at 0-255,
+    "us" being at 0-1023), and in rhRssi "us" plus "peakAge" and
+    "levelPeakAge": per node, how many us before "us" the first and last
+    samples at its peak were. The history then has each peak at its sample
+    time, so the Marshal page recalculates passes to the live times.
 
 Passes carry the gate's timestamp, converted with the measured clock offset.
 Network delay affects arrival order and admission near race boundaries, but
@@ -54,6 +59,9 @@ RSSI_MAX = 255
 # first is kept. Courses that revisit the same gate within 0.5 s need a
 # smaller filter interval; timestamps alone cannot distinguish a revisit.
 PASS_FRAGMENT_S = 0.5
+# A peak older than this in an rhRssi message is a node with no recent
+# samples (switched off, or not yet sampled): history takes arrival time.
+PEAK_AGE_MAX_US = 1_000_000
 # Passes waiting for RotorHazard. Handing a pass over blocks while
 # RotorHazard's own queue is full, so it happens away from the stream reader,
 # which would otherwise stop reading RSSI too. Beyond this many waiting, new
@@ -335,7 +343,9 @@ class FPVGateInterface(BaseHardwareInterface):
         if not 0 <= index < len(self._nodes) or self._offset is None:
             return
         node = self._nodes[index]
-        pass_s = msg["us"] / 1e6
+        # The pass timed at the scale RotorHazard's history uses (see _on_rssi).
+        pass_us = msg["levelUs"] if self.scale == 1 and "levelUs" in msg else msg["us"]
+        pass_s = pass_us / 1e6
         last = self._last_pass_s.get(index)
         if last is not None and 0 <= pass_s - last < PASS_FRAGMENT_S:
             logger.debug("FPVGate node %d: pass %.3f s after the last one ignored", index + 1, pass_s - last)
@@ -346,7 +356,7 @@ class FPVGateInterface(BaseHardwareInterface):
             node.pass_peak_rssi = peak
             node.node_peak_rssi = max(peak, node.node_peak_rssi)
         try:
-            self._passes.put_nowait((node, self.server_time(msg["us"]), peak or None))
+            self._passes.put_nowait((node, self.server_time(pass_us), peak or None))
         except gevent.queue.Full:
             self.passes_dropped += 1
             self._report_overload()
@@ -382,6 +392,9 @@ class FPVGateInterface(BaseHardwareInterface):
         readtime = self.server_time(msg["us"]) if "us" in msg and self._offset is not None else monotonic()
         inside = msg.get("in", 0)
         values = msg.get("raw", []) if self.scale > 1 else msg.get("rssi", [])
+        # When each value was sampled (newer C5 gates): its peak's first and
+        # last sample, in us before "us", at the scale shown.
+        ages = msg.get("peakAge" if self.scale > 1 else "levelPeakAge") if "us" in msg else None
         for index, rssi in enumerate(values):
             if index >= len(self._nodes):
                 break
@@ -391,6 +404,10 @@ class FPVGateInterface(BaseHardwareInterface):
             node.node_nadir_rssi = min(rssi, node.node_nadir_rssi) if node.node_nadir_rssi else rssi
             history = PeakNadirHistory(node.index)
             history.peakRssi = rssi
+            if ages and len(ages) >= 2 * index + 2 and 0 <= ages[2 * index + 1] <= ages[2 * index] <= PEAK_AGE_MAX_US:
+                # RotorHazard's peak times: ms before readtime, first then last.
+                history.peakFirstTime = ages[2 * index] / 1000
+                history.peakLastTime = ages[2 * index + 1] / 1000
             self.process_history(node, readtime, history)
             crossing = bool(inside >> index & 1)
             if crossing != node.crossing_flag:
