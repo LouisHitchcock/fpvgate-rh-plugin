@@ -21,7 +21,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 RH_SOURCE = Path(os.environ['RH_SOURCE'])
@@ -85,7 +85,7 @@ def gate_events(seed, poll_ms=50):
 
 @unittest.skipUnless(GATE_RH_SIM, 'set GATE_RH_SIM to the FPVGate repo\'s rh_timing_sim')
 class HistoryTimingTest(unittest.TestCase):
-    def run_gate(self, seed, full_rssi, strip=False):
+    def run_gate(self, seed, full_rssi, strip=False, clock_jump=False):
         info = {'rawMax': 1023, 'nodes': [{'frequency': 5658, 'enter': ENTER, 'exit': EXIT}]}
         gate = interface.FPVGateInterface('sim', 8, info=info, full_rssi=full_rssi)
         gate._offset = 0.0  # gate clock == RotorHazard's
@@ -100,6 +100,16 @@ class HistoryTimingTest(unittest.TestCase):
                     for key in NEW_FIELDS:
                         if not (name == 'rhPass' and key == 'us'):
                             msg.pop(key, None)
+                if clock_jump and name == 'rhPass':
+                    # A better HTTP clock measurement arrives after the peak
+                    # history, just before the delayed live pass is processed.
+                    self.assertTrue(gate._nodes[0].crossing_flag)
+                    response = Mock()
+                    response.json.return_value = {'us': round((clock[0] + 0.021) * 1e6)}
+                    with patch.object(interface, 'monotonic', side_effect=[clock[0], clock[0] + 0.002]), \
+                            patch.object(gate._session, 'get', return_value=response):
+                        gate._sample_clock_locked()
+                    clock_jump = False
                 (gate._on_pass if name == 'rhPass' else gate._on_rssi)(msg)
         live = []
         while not gate._passes.empty():
@@ -126,6 +136,41 @@ class HistoryTimingTest(unittest.TestCase):
         live, recalc, _ = self.run_gate(1, False, strip=True)
         offsets = self.offsets(live, recalc)
         self.assertGreater(min(offsets), 0, f'recalc minus live, ms: {offsets}')
+
+    def test_clock_correction_during_pass_preserves_history_timing(self):
+        for full_rssi in (False, True):
+            with self.subTest(full_rssi=full_rssi):
+                live, recalc, count = self.run_gate(1, full_rssi, clock_jump=True)
+                self.assertEqual(len(live), count)
+                self.assertEqual(len(recalc), count)
+                self.assertLessEqual(max(map(abs, self.offsets(live, recalc))), 1.0)
+
+    def test_clock_correction_is_adopted_between_passes(self):
+        gate = interface.FPVGateInterface('sim', 1)
+        gate._offset = 0.0
+        gate._nodes[0].crossing_flag = True
+        response = Mock()
+        response.json.side_effect = [{'us': 100_022_000}, {'us': 101_031_000}]
+        with patch.object(gate._session, 'get', return_value=response), \
+                patch.object(interface, 'monotonic', side_effect=[100, 100.004, 101, 101.002]):
+            gate._sample_clock_locked()
+            self.assertEqual(gate._offset, 0.0)
+            gate._nodes[0].crossing_flag = False
+            gate._sample_clock_locked()
+        self.assertAlmostEqual(gate._offset, 0.03)
+        self.assertEqual(len(gate._clock), 2)
+
+    def test_clock_restart_resyncs_even_during_a_crossing(self):
+        gate = interface.FPVGateInterface('sim', 1)
+        gate._offset = 20.0
+        gate._last_clock_reading = 1000.0
+        gate._nodes[0].crossing_flag = True
+        response = Mock()
+        response.json.return_value = {'us': 100_022_000}
+        with patch.object(gate._session, 'get', return_value=response), \
+                patch.object(interface, 'monotonic', side_effect=[100, 100.004]):
+            gate._sample_clock_locked()
+        self.assertAlmostEqual(gate._offset, 0.02)
 
 
 if __name__ == '__main__':

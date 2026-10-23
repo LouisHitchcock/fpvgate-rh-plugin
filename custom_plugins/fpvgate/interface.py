@@ -230,12 +230,18 @@ class FPVGateInterface(BaseHardwareInterface):
         if self._last_clock_reading is not None and gate_s < self._last_clock_reading:
             self._clock.clear()
             self._last_pass_s.clear()
+            self._offset = None
             logger.info("FPVGate at %s restarted its clock; resynchronizing", self.address)
         self._last_clock_reading = gate_s
         self._clock.append((t1 - t0, gate_s - (t0 + t1) / 2))
         rtt, offset = min(self._clock)
-        self._offset = offset
-        self.sync_ms = rtt * 500  # worst case error is half the round trip
+        # A clock correction between the history peak and its delayed pass
+        # would timestamp the same samples with two different offsets. Keep
+        # polling for the heartbeat and fresh measurements, but adopt an
+        # updated offset between passes. A restarted gate still resyncs now.
+        if self._offset is None or not any(node.crossing_flag for node in self._nodes):
+            self._offset = offset
+            self.sync_ms = rtt * 500  # worst case error is half the round trip
 
     def _resync_clock(self):
         with self._clock_lock:
