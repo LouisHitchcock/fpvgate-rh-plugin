@@ -1,7 +1,7 @@
 # FPVGate RotorHazard Plugin v2.3.2-rc.1
 
 24 October 2026. RotorHazard timing test prerelease, paired with gate firmware
-[v1.9.0-Alpha-4-RH-1](https://github.com/LouisHitchcock/FPVGate/releases/tag/v1.9.0-Alpha-4-RH-1).
+[v1.9.0-alpha-5](https://github.com/LouisHitchcock/FPVGate/releases/tag/v1.9.0-alpha-5).
 
 ## Timing fixes
 
@@ -23,7 +23,7 @@ RH APIs; they are not the focus of this test.
    release and copy its `custom_plugins/fpvgate/` folder into the RH data
    `plugins/` directory, replacing the existing `fpvgate` folder. Keep only
    one installed copy. The archive also includes the MIT license.
-3. Upgrade the S3 gate to `1.9.0-Alpha-4-RH-1` using that release's board-specific
+3. Upgrade the S3 gate to `1.9.0-alpha-5` using that release's board-specific
    firmware/filesystem pair, then restart RotorHazard.
 4. Confirm the FPVGate panel connects and the RH startup log reports
    `FPVGate plugin 2.3.2-rc.1`.

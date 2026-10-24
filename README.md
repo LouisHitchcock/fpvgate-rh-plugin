@@ -3,7 +3,7 @@
 Use an [FPVGate](https://github.com/LouisHitchcock/FPVGate) lap timer as timing hardware in [RotorHazard](https://github.com/RotorHazard/RotorHazard).
 
 **RH timing test:** plugin v2.3.2-rc.1 pairs with gate firmware
-[v1.9.0-Alpha-4-RH-1](https://github.com/LouisHitchcock/FPVGate/releases/tag/v1.9.0-Alpha-4-RH-1).
+[v1.9.0-alpha-5](https://github.com/LouisHitchcock/FPVGate/releases/tag/v1.9.0-alpha-5).
 Download this test version from its [prerelease page](https://github.com/LouisHitchcock/fpvgate-rh-plugin/releases/tag/v2.3.2-rc.1),
 replace the existing plugin folder and restart RotorHazard. See its release
 notes for the timing test and data collection instructions.
