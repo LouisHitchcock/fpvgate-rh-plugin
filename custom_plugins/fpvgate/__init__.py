@@ -26,7 +26,7 @@ from .interface import FPVGateInterface, FPVGateSplitInterface, get_info
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "2.3.1"
+PLUGIN_VERSION = "2.3.2-rc.1"
 SECTION = "FPVGate"
 PANEL = "fpvgate"
 DEFAULT_NODES = 8

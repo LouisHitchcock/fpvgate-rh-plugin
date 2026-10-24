@@ -2,7 +2,7 @@
   "domain": "fpvgate",
   "name": "FPVGate",
   "description": "Use FPVGates as RotorHazard timing hardware, with live RSSI and split-gate tuning graphs.",
-  "version": "2.3.1",
+  "version": "2.3.2-rc.1",
   "required_rhapi_version": "1.4",
   "author": "Louis Hitchcock",
   "author_uri": "https://github.com/LouisHitchcock",

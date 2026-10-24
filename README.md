@@ -2,6 +2,12 @@
 
 Use an [FPVGate](https://github.com/LouisHitchcock/FPVGate) lap timer as timing hardware in [RotorHazard](https://github.com/RotorHazard/RotorHazard).
 
+**RH timing test:** plugin v2.3.2-rc.1 pairs with gate firmware
+[v1.9.0-Alpha-4-RH-1](https://github.com/LouisHitchcock/FPVGate/releases/tag/v1.9.0-Alpha-4-RH-1).
+Download this test version from its [prerelease page](https://github.com/LouisHitchcock/fpvgate-rh-plugin/releases/tag/v2.3.2-rc.1),
+replace the existing plugin folder and restart RotorHazard. See its release
+notes for the timing test and data collection instructions.
+
 An FPVGate with an ESP32-C5 receiver times up to eight pilots from one gate; an RX5808 FPVGate times one. Either way it appears in RotorHazard as nodes, like any other timer:
 
 - every pass reaches RotorHazard with the gate's own timestamp, so lap times don't depend on Wi-Fi delay
@@ -69,7 +75,7 @@ The plugin registers an FPVGate hardware interface with RotorHazard and talks to
 
 RotorHazard keeps that RSSI history for each race (the gate declares full RSSI marshaling), so the Marshal page can show the trace and recalculate laps from new Enter/Exit levels.
 
-The clock offset comes from the poll with the fastest round trip among the last 12, so it follows crystal drift over a long event.
+The clock offset comes from the poll with the fastest round trip among the last 12, so it follows crystal drift over a long event. New offsets are adopted between crossings, keeping a pass and its RSSI history on the same clock mapping.
 
 ## Version 1 firmware
 

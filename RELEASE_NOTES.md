@@ -1,4 +1,43 @@
-# FPVGate RotorHazard Plugin v2.3.1 (unreleased draft)
+# FPVGate RotorHazard Plugin v2.3.2-rc.1
+
+24 October 2026. RotorHazard timing test prerelease, paired with gate firmware
+[v1.9.0-Alpha-4-RH-1](https://github.com/LouisHitchcock/FPVGate/releases/tag/v1.9.0-Alpha-4-RH-1).
+
+## Timing fixes
+
+- RSSI history uses the gate's peak sample timestamps so Marshal recalculation
+  and live passes refer to the same samples, at both RSSI resolutions.
+- Clock corrections are adopted between crossings; a correction during a
+  crossing no longer gives its history and live pass different clock offsets.
+- Gate restarts still invalidate the old mapping and resynchronize immediately.
+
+This is based on the development plugin, including the existing split-gate
+and Sensor Tuning integration described below. Normal lap timing supports
+RotorHazard 4.4.0 or later. Split timing/tuning features still need the relevant
+RH APIs; they are not the focus of this test.
+
+## Install
+
+1. Back up the RotorHazard database and current plugin folder.
+2. Stop RotorHazard. Extract `fpvgate-rh-plugin-v2.3.2-rc.1.zip` from this
+   release and copy its `custom_plugins/fpvgate/` folder into the RH data
+   `plugins/` directory, replacing the existing `fpvgate` folder. Keep only
+   one installed copy. The archive also includes the MIT license.
+3. Upgrade the S3 gate to `1.9.0-Alpha-4-RH-1` using that release's board-specific
+   firmware/filesystem pair, then restart RotorHazard.
+4. Confirm the FPVGate panel connects and the RH startup log reports
+   `FPVGate plugin 2.3.2-rc.1`.
+
+Keep the current frequencies, thresholds and RSSI resolution for the first
+test. No separate C5 receiver update is needed for an already working Alpha-4
+setup. Save the original RH database before recalculating laps. An exporter
+should preserve live/recalculated crossing timestamps separately, relative
+to race start, including Gate 1 and the node/pilot identifiers.
+
+Camera validation and physical multi-transmitter tests are still outstanding.
+Matching live and recalculated times is not proof of RF accuracy.
+
+## Development changes included from v2.3.1
 
 - Split gates appear directly in **Settings > Sensor Tuning** on RotorHazard builds with the proposed receiver tuning API (RHAPI 1.11). Each split node has RH's graph, pause, crossing indicator, EnterAt/ExitAt controls, threshold dragging, and a three-second RSSI capture using receiver samples.
 - Split thresholds are saved independently to the selected gate; split receivers do not become extra pilot seats. The standalone tuning page, its HTTP APIs and its history buffer have been removed. Older RH builds can still use split timing, with thresholds configured on the gate itself.
